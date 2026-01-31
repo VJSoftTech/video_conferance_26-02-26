@@ -1,0 +1,466 @@
+================================================================================
+                    MEETSPACE COMPLETE DEPLOYMENT GUIDE
+================================================================================
+
+This guide provides ALL commands needed to deploy பேசு தமிழ் from scratch.
+
+
+================================================================================
+STEP 1: SERVER SETUP (Ubuntu/Debian)
+================================================================================
+
+First, update your server and install required software:
+
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install Node.js 20
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Verify Node.js installation
+node --version    # Should show v20.x.x
+npm --version     # Should show 10.x.x
+
+# Install build tools (needed for some npm packages)
+sudo apt install -y build-essential
+
+# Install unzip (to extract the zip file)
+sudo apt install -y unzip
+
+# Install PM2 globally (keeps app running)
+sudo npm install -g pm2
+
+
+================================================================================
+STEP 2: INSTALL POSTGRESQL (Choose Option A or B)
+================================================================================
+
+----- OPTION A: Install PostgreSQL Locally -----
+
+# Install PostgreSQL
+sudo apt install -y postgresql postgresql-contrib
+
+# Start PostgreSQL service
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Check if PostgreSQL is running
+sudo systemctl status postgresql
+
+# Create database and user
+sudo -u postgres psql
+
+# Inside PostgreSQL prompt, run these commands:
+CREATE DATABASE meetspace;
+CREATE USER meetspace_user WITH ENCRYPTED PASSWORD 'YourSecurePassword123';
+GRANT ALL PRIVILEGES ON DATABASE meetspace TO meetspace_user;
+\c meetspace
+GRANT ALL ON SCHEMA public TO meetspace_user;
+\q
+
+# Your DATABASE_URL will be:
+# DATABASE_URL=postgresql://meetspace_user:YourSecurePassword123@localhost:5432/meetspace
+
+
+----- OPTION B: Use Cloud PostgreSQL (Recommended - Easier) -----
+
+Using Neon (Free):
+1. Go to https://neon.tech
+2. Sign up with GitHub or Google
+3. Click "Create Project"
+4. Name it "meetspace"
+5. Click "Create Project"
+6. Copy the connection string shown
+
+Example Neon connection string:
+DATABASE_URL=postgresql://meetspace_owner:abc123xyz@ep-cool-dawn-123456.us-east-2.aws.neon.tech/meetspace?sslmode=require
+
+
+Using Supabase (Free):
+1. Go to https://supabase.com
+2. Sign up and create new project
+3. Go to Settings > Database
+4. Copy connection string (use "Connection string" tab, select "URI")
+
+Example Supabase connection string:
+DATABASE_URL=postgresql://postgres:YourProjectPassword@db.abcdefghij.supabase.co:5432/postgres
+
+
+================================================================================
+STEP 3: GET LIVEKIT CREDENTIALS
+================================================================================
+
+LiveKit provides the video/audio infrastructure:
+
+1. Go to https://cloud.livekit.io
+2. Sign up (free tier: 50 monthly active users)
+3. Click "Create Project"
+4. Name it "பேசு தமிழ்" and click Create
+5. Go to Settings > Keys
+6. Copy these three values:
+
+   LIVEKIT_API_KEY=APIxxxxxxxxxx
+   LIVEKIT_API_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   VITE_LIVEKIT_URL=wss://your-project-name.livekit.cloud
+
+Example:
+   LIVEKIT_API_KEY=APIkmzYz8xHnL7
+   LIVEKIT_API_SECRET=T8xnFkMqZpLsD2wCvBnMaE4rT6yU8iO0pLkJhGfDsAb
+   VITE_LIVEKIT_URL=wss://meetspace-prod-abc123.livekit.cloud
+
+
+================================================================================
+STEP 4: UPLOAD AND EXTRACT PROJECT
+================================================================================
+
+# Create app directory
+mkdir -p /var/www
+cd /var/www
+
+# Upload meetspace-delivery.zip to your server using SCP or SFTP
+# Example using SCP from your local machine:
+# scp meetspace-delivery.zip user@your-server-ip:/var/www/
+
+# Extract the zip file
+unzip meetspace-delivery.zip -d meetspace
+cd meetspace
+
+# Verify files are extracted
+ls -la
+# You should see: client/, server/, shared/, package.json, etc.
+
+
+================================================================================
+STEP 5: CREATE ENVIRONMENT FILE
+================================================================================
+
+# Create .env file
+nano .env
+
+# Paste the following (replace with YOUR actual values):
+
+DATABASE_URL=postgresql://meetspace_user:YourSecurePassword123@localhost:5432/meetspace
+LIVEKIT_API_KEY=APIkmzYz8xHnL7
+LIVEKIT_API_SECRET=T8xnFkMqZpLsD2wCvBnMaE4rT6yU8iO0pLkJhGfDsAb
+VITE_LIVEKIT_URL=wss://meetspace-prod.livekit.cloud
+SESSION_SECRET=GenerateRandomStringHere123456789
+
+# Save and exit: Press Ctrl+X, then Y, then Enter
+
+# Generate a random SESSION_SECRET (optional):
+openssl rand -base64 32
+
+
+================================================================================
+STEP 6: INSTALL DEPENDENCIES
+================================================================================
+
+# Make sure you're in the meetspace directory
+cd /var/www/meetspace
+
+# Install all npm packages
+npm install
+
+# This takes 1-3 minutes. You should see:
+# "added XXX packages in Xs"
+
+
+================================================================================
+STEP 7: SETUP DATABASE TABLES
+================================================================================
+
+# Push database schema
+npm run db:push
+
+# You should see:
+# "Pushing schema changes..."
+# "Changes applied"
+
+
+================================================================================
+STEP 8: BUILD FOR PRODUCTION
+================================================================================
+
+# Build the application
+npm run build
+
+# This creates the 'dist' folder with optimized files
+# You should see:
+# "Build completed successfully"
+
+
+================================================================================
+STEP 9: START THE APPLICATION
+================================================================================
+
+----- Option A: Simple Start (for testing) -----
+
+npm start
+
+# You should see:
+# "[express] serving on port 5000"
+# Press Ctrl+C to stop
+
+
+----- Option B: Production Start with PM2 (Recommended) -----
+
+# Start with PM2
+pm2 start npm --name "meetspace" -- start
+
+# Check if running
+pm2 status
+
+# View logs
+pm2 logs meetspace
+
+# Make it start on server reboot
+pm2 startup
+pm2 save
+
+
+================================================================================
+STEP 10: TEST YOUR APPLICATION
+================================================================================
+
+# Check if app is accessible locally
+curl http://localhost:5000
+
+# From your browser, visit:
+http://YOUR-SERVER-IP:5000
+
+# You should see the பேசு தமிழ் login page!
+
+
+================================================================================
+STEP 11: SETUP NGINX REVERSE PROXY (Optional but Recommended)
+================================================================================
+
+# Install Nginx
+sudo apt install -y nginx
+
+# Create Nginx configuration
+sudo nano /etc/nginx/sites-available/meetspace
+
+# Paste this configuration:
+
+server {
+    listen 80;
+    server_name your-domain.com;  # or your server IP
+
+    location / {
+        proxy_pass http://localhost:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 86400;
+    }
+}
+
+# Save and exit: Ctrl+X, Y, Enter
+
+# Enable the site
+sudo ln -s /etc/nginx/sites-available/meetspace /etc/nginx/sites-enabled/
+
+# Remove default site (optional)
+sudo rm /etc/nginx/sites-enabled/default
+
+# Test Nginx configuration
+sudo nginx -t
+
+# Restart Nginx
+sudo systemctl restart nginx
+
+# Now access via port 80:
+http://your-domain.com
+
+
+================================================================================
+STEP 12: SETUP SSL/HTTPS (Optional but Recommended)
+================================================================================
+
+# Install Certbot
+sudo apt install -y certbot python3-certbot-nginx
+
+# Get SSL certificate (replace with your domain)
+sudo certbot --nginx -d your-domain.com
+
+# Follow the prompts:
+# - Enter email
+# - Agree to terms
+# - Choose redirect HTTP to HTTPS (recommended)
+
+# Auto-renewal is set up automatically
+# Test renewal:
+sudo certbot renew --dry-run
+
+
+================================================================================
+COMPLETE COMMAND SUMMARY (Copy-Paste Ready)
+================================================================================
+
+# ===== SERVER SETUP =====
+sudo apt update && sudo apt upgrade -y
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs build-essential unzip
+sudo npm install -g pm2
+
+# ===== POSTGRESQL (Local) =====
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+sudo -u postgres psql -c "CREATE DATABASE meetspace;"
+sudo -u postgres psql -c "CREATE USER meetspace_user WITH ENCRYPTED PASSWORD 'YourPassword123';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE meetspace TO meetspace_user;"
+sudo -u postgres psql -d meetspace -c "GRANT ALL ON SCHEMA public TO meetspace_user;"
+
+# ===== DEPLOY APPLICATION =====
+mkdir -p /var/www && cd /var/www
+unzip meetspace-delivery.zip -d meetspace
+cd meetspace
+
+# Create .env file with your credentials
+cat > .env << 'EOF'
+DATABASE_URL=postgresql://meetspace_user:YourPassword123@localhost:5432/meetspace
+LIVEKIT_API_KEY=your_api_key
+LIVEKIT_API_SECRET=your_api_secret
+VITE_LIVEKIT_URL=wss://your-project.livekit.cloud
+SESSION_SECRET=your_random_secret_string
+EOF
+
+# Install and build
+npm install
+npm run db:push
+npm run build
+
+# Start with PM2
+pm2 start npm --name "meetspace" -- start
+pm2 startup
+pm2 save
+
+# ===== NGINX (Optional) =====
+sudo apt install -y nginx
+sudo tee /etc/nginx/sites-available/meetspace > /dev/null << 'EOF'
+server {
+    listen 80;
+    server_name _;
+    location / {
+        proxy_pass http://localhost:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 86400;
+    }
+}
+EOF
+sudo ln -sf /etc/nginx/sites-available/meetspace /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl restart nginx
+
+
+================================================================================
+PM2 COMMANDS REFERENCE
+================================================================================
+
+pm2 status                  # Check app status
+pm2 logs meetspace          # View live logs
+pm2 logs meetspace --lines 100   # View last 100 log lines
+pm2 restart meetspace       # Restart the app
+pm2 stop meetspace          # Stop the app
+pm2 delete meetspace        # Remove from PM2
+pm2 monit                   # Real-time monitoring dashboard
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: "npm install" fails with permission errors
+Solution:
+  sudo chown -R $USER:$USER /var/www/meetspace
+  npm install
+
+Problem: "ECONNREFUSED" database error
+Solution: Check PostgreSQL is running:
+  sudo systemctl status postgresql
+  sudo systemctl start postgresql
+
+Problem: Port 5000 is already in use
+Solution: Find and kill the process:
+  sudo lsof -i :5000
+  sudo kill -9 <PID>
+
+Problem: LiveKit video not working
+Solution: Check .env file has correct values:
+  - LIVEKIT_API_KEY (starts with "API")
+  - LIVEKIT_API_SECRET
+  - VITE_LIVEKIT_URL (starts with "wss://")
+
+Problem: "Permission denied" when running npm
+Solution:
+  sudo chown -R $USER:$USER ~/.npm
+  sudo chown -R $USER:$USER /var/www/meetspace
+
+Problem: App not accessible from internet
+Solution: Check firewall:
+  sudo ufw allow 80
+  sudo ufw allow 443
+  sudo ufw allow 5000
+
+
+================================================================================
+COMPLETE .ENV EXAMPLE
+================================================================================
+
+# Database (Local PostgreSQL)
+DATABASE_URL=postgresql://meetspace_user:SecurePass123@localhost:5432/meetspace
+
+# Database (Neon Cloud - Alternative)
+# DATABASE_URL=postgresql://owner:pass@ep-xyz.us-east-2.aws.neon.tech/meetspace?sslmode=require
+
+# LiveKit Video Infrastructure
+LIVEKIT_API_KEY=APIkmzYz8xHnL7
+LIVEKIT_API_SECRET=T8xnFkMqZpLsD2wCvBnMaE4rT6yU8iO0pLkJhGfDsAb
+VITE_LIVEKIT_URL=wss://meetspace-prod-abc123.livekit.cloud
+
+# Session Security (generate with: openssl rand -base64 32)
+SESSION_SECRET=kJ8mN3pQ7rT2vX5zA9cE4fG6hI1jL0oMaBcDeFgHiJk
+
+# Optional: Your domain for email invites
+APP_DOMAIN=meet.yourcompany.com
+
+
+================================================================================
+QUICK CLOUD DEPLOYMENT OPTIONS
+================================================================================
+
+----- Railway (Easiest) -----
+1. Go to https://railway.app
+2. Connect GitHub and import your code
+3. Add PostgreSQL database
+4. Set environment variables
+5. Deploy automatically
+
+----- Render -----
+1. Go to https://render.com
+2. Create new Web Service
+3. Connect your repository
+4. Add environment variables
+5. Create PostgreSQL database
+6. Deploy
+
+----- DigitalOcean App Platform -----
+1. Go to https://cloud.digitalocean.com/apps
+2. Create new app from GitHub
+3. Add PostgreSQL database
+4. Configure environment variables
+5. Deploy
+
+
+================================================================================

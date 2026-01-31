@@ -1,0 +1,128 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import '@livekit/components-styles';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Video mirroring: Local view is mirrored (like a mirror), remote views are not */
+
+:root {
+  /* Modern Dark Theme Palette - Deep & Premium */
+  --font-display: 'Plus Jakarta Sans', sans-serif;
+  --font-body: 'Outfit', sans-serif;
+
+  --background: 240 10% 4%;
+  --foreground: 0 0% 98%;
+
+  /* Vibrant Purple/Indigo Primary */
+  --primary: 250 85% 65%;
+  --primary-foreground: 0 0% 100%;
+
+  /* Soft Secondary */
+  --secondary: 240 6% 15%;
+  --secondary-foreground: 0 0% 98%;
+
+  /* Muted tones for depth */
+  --muted: 240 6% 15%;
+  --muted-foreground: 240 5% 65%;
+
+  /* Accent for highlights */
+  --accent: 250 85% 65%;
+  --accent-foreground: 0 0% 100%;
+
+  /* Error/Destructive */
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 98%;
+
+  /* Borders & Inputs */
+  --border: 240 6% 15%;
+  --input: 240 6% 15%;
+  --ring: 250 85% 65%;
+
+  --radius: 0.75rem;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground antialiased selection:bg-primary/30 selection:text-primary-foreground;
+    font-family: var(--font-body);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    @apply font-bold tracking-tight;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  .glass-panel {
+    @apply bg-black/40 backdrop-blur-xl border border-white/10 shadow-xl;
+  }
+  
+  .glass-button {
+    @apply bg-white/5 hover:bg-white/10 border border-white/10 backdrop-blur-md transition-all duration-300;
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animate-bounce-in {
+    animation: bounceIn 0.5s ease-out forwards;
+  }
+}
+
+@keyframes bounceIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) translateY(20px);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1) translateY(-5px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
+  100% { transform: translateY(0px); }
+}
+
+/* Customizing LiveKit styles to match our theme */
+.lk-video-conference {
+  font-family: var(--font-body) !important;
+  background-color: transparent !important;
+}
+
+.lk-control-bar {
+  background-color: rgba(0, 0, 0, 0.6) !important;
+  backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 16px !important;
+  margin-bottom: 24px !important;
+}
+
+.lk-button {
+  border-radius: 12px !important;
+}
+
+.lk-grid-layout {
+  gap: 16px !important;
+}
+
+.lk-participant-tile {
+  border-radius: 16px !important;
+  overflow: hidden !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background-color: #1a1a1a !important;
+}
