@@ -32,6 +32,14 @@ function MeetingContent({ roomId, serverUrl, onLeave, isHost }: { roomId: string
   const { localParticipant } = useLocalParticipant();
   const { toast } = useToast();
 
+const toggleRecordingUI = (hide: boolean) => {
+  const header = document.getElementById("meeting-header");
+  const controls = document.getElementById("meeting-controls");
+
+  if (header) header.style.display = hide ? "none" : "";
+  if (controls) controls.style.display = hide ? "none" : "";
+};
+
   const {
     state: recordingState,
     formattedDuration: recordingDuration,
@@ -542,7 +550,8 @@ function MeetingContent({ roomId, serverUrl, onLeave, isHost }: { roomId: string
 
   return (
     <div className="flex flex-col h-screen bg-background">
-      <header className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-card shrink-0 z-30">
+      {/* Arun */}
+      <header  id="meeting-header" className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-card shrink-0 z-30">
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-semibold hidden sm:block">பேசு தமிழ்</h1>
           <Badge variant="secondary" className="text-xs">
@@ -661,7 +670,7 @@ function MeetingContent({ roomId, serverUrl, onLeave, isHost }: { roomId: string
           </div>
         </div>
       )}
-
+<div id="meeting-controls">
       <ControlBar
         isAudioEnabled={isAudioEnabled}
         isVideoEnabled={isVideoEnabled}
@@ -682,15 +691,24 @@ function MeetingContent({ roomId, serverUrl, onLeave, isHost }: { roomId: string
         onToggleHostControls={() => setIsHostControlsOpen(!isHostControlsOpen)}
         onToggleHandRaise={handleToggleHandRaise}
         onSendReaction={handleSendReaction}
-        onStartRecording={startRecording}
+        // onStartRecording={startRecording}
+        onStartRecording={() => {
+  toggleRecordingUI(true);
+  startRecording();
+}}
+
         onPauseRecording={pauseRecording}
         onResumeRecording={resumeRecording}
-        onStopRecording={stopRecording}
+        // onStopRecording={stopRecording}
+        onStopRecording={() => {
+  stopRecording();
+  toggleRecordingUI(false);
+}}
         isChatPanelOpen={isChatPanelOpen}
         unreadMessageCount={unreadMessageCount}
         onLeave={onLeave}
       />
-
+</div>
 
       <RoomAudioRenderer />
     </div>

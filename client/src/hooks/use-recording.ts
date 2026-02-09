@@ -15,9 +15,9 @@ export function useRecording({ roomId, hostId, onRecordingComplete, onError }: U
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
-  const displayStreamRef = useRef<MediaStream | null>(null); // ADD THIS
-const micStreamRef = useRef<MediaStream | null>(null); // ADD THIS
-const audioContextRef = useRef<AudioContext | null>(null); // ADD THIS
+  const displayStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const startTimeRef = useRef<number>(0);
   const pausedTimeRef = useRef<number>(0);
   const durationIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -29,184 +29,218 @@ const audioContextRef = useRef<AudioContext | null>(null); // ADD THIS
     }
   }, [state]);
 
- const startRecording = useCallback(async () => {
-  try {
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { 
-        displaySurface: "browser",
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-      },
-      audio: true, // ✅ This captures tab audio (system audio from the tab)
-      // @ts-ignore - These are experimental but widely supported
-      preferCurrentTab: true,
-      selfBrowserSurface: "include",
-      surfaceSwitching: "exclude",
-    });
-    displayStreamRef.current = displayStream;
+  // ✅ FIXED: Hide ALL UI elements during recording
+  const toggleMeetingControls = (hide: boolean) => {
+    // Hide bottom controls
+    const controls = document.getElementById("meeting-controls");
+    if (controls) {
+      controls.style.display = hide ? "none" : "flex";
+    }
+    
+    // Hide top header - try multiple selectors to find it
+    const header = 
+      document.getElementById("meeting-header") || 
+      document.querySelector("header") || 
+      document.querySelector("[class*='header']") ||
+      document.querySelector("nav");
+    
+    if (header) {
+      (header as HTMLElement).style.display = hide ? "none" : "flex";
+    }
+    
+    // If you know the exact class or ID of your header, replace above with:
+    // const header = document.querySelector(".your-header-class");
+    // if (header) {
+    //   (header as HTMLElement).style.display = hide ? "none" : "flex";
+    // }
+  };
 
-    // ✅ Capture microphone audio separately
-    let micStream: MediaStream | null = null;
+  const startRecording = useCallback(async () => {
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        } 
+      // ✅ Hide UI before starting recording
+      toggleMeetingControls(true);
+
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { 
+          displaySurface: "browser",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: true, // ✅ This captures tab audio (system audio from the tab)
+        // @ts-ignore - These are experimental but widely supported
+        preferCurrentTab: true,
+        selfBrowserSurface: "include",
+        surfaceSwitching: "exclude",
       });
-      micStreamRef.current = micStream;
-    } catch (e) {
-      console.log("Could not capture microphone audio:", e);
-    }
+      displayStreamRef.current = displayStream;
 
-    // ✅ Use Web Audio API to mix all audio sources
-    const audioContext = new AudioContext();
-    audioContextRef.current = audioContext; 
-    const destination = audioContext.createMediaStreamDestination();
-
-    // Mix tab audio (other participants' voices from the meeting)
-    const tabAudioTracks = displayStream.getAudioTracks();
-    if (tabAudioTracks.length > 0) {
-      console.log("Adding tab audio to recording");
-      const tabAudioSource = audioContext.createMediaStreamSource(
-        new MediaStream(tabAudioTracks)
-      );
-      tabAudioSource.connect(destination);
-    } else {
-      console.warn("No tab audio available - make sure to check 'Share tab audio' in the screen share dialog");
-    }
-
-    // Mix microphone audio (your voice)
-    if (micStream) {
-      console.log("Adding microphone audio to recording");
-      const micAudioSource = audioContext.createMediaStreamSource(micStream);
-      micAudioSource.connect(destination);
-    }
-
-    // ✅ Combine video from display and mixed audio
-    const tracks = [
-      ...displayStream.getVideoTracks(),
-      ...destination.stream.getAudioTracks(), // Use the mixed audio
-    ];
-
-    const combinedStream = new MediaStream(tracks);
-    streamRef.current = combinedStream;
-
-    console.log("Recording stream tracks:", {
-      video: combinedStream.getVideoTracks().length,
-      audio: combinedStream.getAudioTracks().length,
-    });
-
-    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
-      ? "video/webm;codecs=vp9,opus"
-      : MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
-      ? "video/webm;codecs=vp8,opus"
-      : "video/webm";
-
-    const mediaRecorder = new MediaRecorder(combinedStream, {
-      mimeType,
-      videoBitsPerSecond: 2500000,
-      audioBitsPerSecond: 128000, // ✅ Add audio bitrate
-    });
-
-    chunksRef.current = [];
-
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunksRef.current.push(event.data);
-      }
-    };
-
-    mediaRecorder.onstop = async () => {
-      const blob = new Blob(chunksRef.current, { type: mimeType });
-      const finalDuration = Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000);
-      
-      // ✅ Cleanup audio context
-      audioContext.close();
-      
-      // ✅ Stop microphone stream
-      if (micStream) {
-        micStream.getTracks().forEach(track => track.stop());
-      }
-      
+      // ✅ Capture microphone audio separately
+      let micStream: MediaStream | null = null;
       try {
-        const response = await fetch("/api/recordings/upload", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "x-room-id": roomId,
-            "x-host-id": hostId?.toString() || "",
-            "x-duration": finalDuration.toString(),
-            "x-original-filename": `meeting_${roomId}_${new Date().toISOString().slice(0, 10)}.webm`,
-          },
-          body: blob,
+        micStream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          } 
         });
-
-        const data = await response.json();
-        if (data.success && onRecordingComplete) {
-          onRecordingComplete(data.recording);
-        }
-      } catch (error: any) {
-        console.error("Error uploading recording:", error);
-        if (onError) {
-          onError(error);
-        }
+        micStreamRef.current = micStream;
+      } catch (e) {
+        console.log("Could not capture microphone audio:", e);
       }
 
-      setState("idle");
-      setDuration(0);
-      chunksRef.current = [];
-    };
+      // ✅ Use Web Audio API to mix all audio sources
+      const audioContext = new AudioContext();
+      audioContextRef.current = audioContext; 
+      const destination = audioContext.createMediaStreamDestination();
 
-    displayStream.getVideoTracks()[0].onended = () => {
-      if (durationIntervalRef.current) {
-        clearInterval(durationIntervalRef.current);
-        durationIntervalRef.current = null;
+      // Mix tab audio (other participants' voices from the meeting)
+      const tabAudioTracks = displayStream.getAudioTracks();
+      if (tabAudioTracks.length > 0) {
+        console.log("Adding tab audio to recording");
+        const tabAudioSource = audioContext.createMediaStreamSource(
+          new MediaStream(tabAudioTracks)
+        );
+        tabAudioSource.connect(destination);
+      } else {
+        console.warn("No tab audio available - make sure to check 'Share tab audio' in the screen share dialog");
       }
-      
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
-      }
-      
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-      
-      // ✅ Cleanup audio context
-      audioContext.close();
-      
-      // ✅ Stop microphone
+
+      // Mix microphone audio (your voice)
       if (micStream) {
-        micStream.getTracks().forEach(track => track.stop());
+        console.log("Adding microphone audio to recording");
+        const micAudioSource = audioContext.createMediaStreamSource(micStream);
+        micAudioSource.connect(destination);
       }
-      
-      setState("stopping");
-    };
 
-    mediaRecorderRef.current = mediaRecorder;
-    mediaRecorder.start(1000);
+      // ✅ Combine video from display and mixed audio
+      const tracks = [
+        ...displayStream.getVideoTracks(),
+        ...destination.stream.getAudioTracks(), // Use the mixed audio
+      ];
 
-    startTimeRef.current = Date.now();
-    pausedTimeRef.current = 0;
-    setState("recording");
+      const combinedStream = new MediaStream(tracks);
+      streamRef.current = combinedStream;
 
-    durationIntervalRef.current = setInterval(() => {
-      if (mediaRecorderRef.current?.state === "recording") {
-        const elapsed = Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000);
-        setDuration(elapsed);
+      console.log("Recording stream tracks:", {
+        video: combinedStream.getVideoTracks().length,
+        audio: combinedStream.getAudioTracks().length,
+      });
+
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+        ? "video/webm;codecs=vp9,opus"
+        : MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+        ? "video/webm;codecs=vp8,opus"
+        : "video/webm";
+
+      const mediaRecorder = new MediaRecorder(combinedStream, {
+        mimeType,
+        videoBitsPerSecond: 2500000,
+        audioBitsPerSecond: 128000, // ✅ Add audio bitrate
+      });
+
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        const finalDuration = Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000);
+        
+        // ✅ Cleanup audio context
+        audioContext.close();
+        
+        // ✅ Stop microphone stream
+        if (micStream) {
+          micStream.getTracks().forEach(track => track.stop());
+        }
+        
+        try {
+          const response = await fetch("/api/recordings/upload", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/octet-stream",
+              "x-room-id": roomId,
+              "x-host-id": hostId?.toString() || "",
+              "x-duration": finalDuration.toString(),
+              "x-original-filename": `meeting_${roomId}_${new Date().toISOString().slice(0, 10)}.webm`,
+            },
+            body: blob,
+          });
+
+          const data = await response.json();
+          if (data.success && onRecordingComplete) {
+            onRecordingComplete(data.recording);
+          }
+        } catch (error: any) {
+          console.error("Error uploading recording:", error);
+          if (onError) {
+            onError(error);
+          }
+        }
+
+        setState("idle");
+        setDuration(0);
+        chunksRef.current = [];
+      };
+
+      displayStream.getVideoTracks()[0].onended = () => {
+        // ✅ Show UI when user stops sharing
+        toggleMeetingControls(false); 
+        
+        if (durationIntervalRef.current) {
+          clearInterval(durationIntervalRef.current);
+          durationIntervalRef.current = null;
+        }
+        
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+        
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+        
+        // ✅ Cleanup audio context
+        audioContext.close();
+        
+        // ✅ Stop microphone
+        if (micStream) {
+          micStream.getTracks().forEach(track => track.stop());
+        }
+        
+        setState("stopping");
+      };
+
+      mediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.start(1000);
+
+      startTimeRef.current = Date.now();
+      pausedTimeRef.current = 0;
+      setState("recording");
+
+      durationIntervalRef.current = setInterval(() => {
+        if (mediaRecorderRef.current?.state === "recording") {
+          const elapsed = Math.floor((Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000);
+          setDuration(elapsed);
+        }
+      }, 1000);
+
+    } catch (error: any) {
+      console.error("Error starting recording:", error);
+      // ✅ Show UI if recording fails
+      toggleMeetingControls(false); 
+      if (onError) {
+        onError(error);
       }
-    }, 1000);
-
-  } catch (error: any) {
-    console.error("Error starting recording:", error);
-    if (onError) {
-      onError(error);
+      setState("idle");
     }
-    setState("idle");
-  }
-}, [roomId, hostId, onRecordingComplete, onError, state]);
+  }, [roomId, hostId, onRecordingComplete, onError, state]);
 
   const pauseRecording = useCallback(() => {
     if (mediaRecorderRef.current && state === "recording") {
@@ -224,53 +258,56 @@ const audioContextRef = useRef<AudioContext | null>(null); // ADD THIS
     }
   }, [state]);
 
-const stopRecording = useCallback(() => {
-  if (mediaRecorderRef.current && (state === "recording" || state === "paused")) {
-    setState("stopping");
-    
-    // Stop duration interval
-    if (durationIntervalRef.current) {
-      clearInterval(durationIntervalRef.current);
-      durationIntervalRef.current = null;
-    }
+  const stopRecording = useCallback(() => {
+    // ✅ Show UI when stopping
+    toggleMeetingControls(false);
 
-    // Stop the MediaRecorder first
-    if (mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
+    if (mediaRecorderRef.current && (state === "recording" || state === "paused")) {
+      setState("stopping");
+      
+      // Stop duration interval
+      if (durationIntervalRef.current) {
+        clearInterval(durationIntervalRef.current);
+        durationIntervalRef.current = null;
+      }
 
-    // ✅ CRITICAL: Stop the ORIGINAL display stream (removes "Stop sharing" button)
-    if (displayStreamRef.current) {
-      displayStreamRef.current.getTracks().forEach((track) => {
-        console.log("Stopping original display track:", track.kind);
-        track.stop();
-      });
-      displayStreamRef.current = null;
-    }
+      // Stop the MediaRecorder first
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
 
-    // Stop the combined stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => {
-        track.stop();
-      });
-      streamRef.current = null;
-    }
+      // ✅ CRITICAL: Stop the ORIGINAL display stream (removes "Stop sharing" button)
+      if (displayStreamRef.current) {
+        displayStreamRef.current.getTracks().forEach((track) => {
+          console.log("Stopping original display track:", track.kind);
+          track.stop();
+        });
+        displayStreamRef.current = null;
+      }
 
-    // Stop microphone stream
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((track) => {
-        track.stop();
-      });
-      micStreamRef.current = null;
-    }
+      // Stop the combined stream
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => {
+          track.stop();
+        });
+        streamRef.current = null;
+      }
 
-    // Close audio context
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+      // Stop microphone stream
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((track) => {
+          track.stop();
+        });
+        micStreamRef.current = null;
+      }
+
+      // Close audio context
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
     }
-  }
-}, [state]);
+  }, [state]);
 
   const formatDuration = useCallback((seconds: number) => {
     const hrs = Math.floor(seconds / 3600);
