@@ -1186,33 +1186,47 @@ export async function registerRoutes(
           const roomId = req.headers["x-room-id"] as string;
           const hostId = req.headers["x-host-id"] as string;
           const duration = parseInt(req.headers["x-duration"] as string) || 0;
-          const originalFilename = req.headers["x-original-filename"] as string || "recording.webm";
-          
+          const originalFilename =
+            (req.headers["x-original-filename"] as string) || "recording.webm";
+          const uploadedMimeType =
+            (req.headers["x-mime-type"] as string) || "video/webm";
+
           if (!roomId) {
             return res.status(400).json({ message: "Room ID is required" });
           }
 
           const timestamp = Date.now();
-          const filename = `recording_${roomId}_${timestamp}.webm`;
+          const ext = path.extname(originalFilename) || ".webm";
+          const filename = `recording_${roomId}_${timestamp}${ext}`;
           const filePath = path.join(RECORDINGS_DIR, filename);
 
           fs.writeFileSync(filePath, buffer);
 
-          const [meeting] = await db.select().from(meetings).where(eq(meetings.roomId, roomId)).limit(1);
+          const [meeting] = await db
+            .select()
+            .from(meetings)
+            .where(eq(meetings.roomId, roomId))
+            .limit(1);
 
-          const [recording] = await db.insert(meetingRecordings).values({
-            roomId,
-            meetingId: meeting?.id || null,
-            hostId: hostId ? parseInt(hostId) : null,
-            filename,
-            originalFilename,
-            fileSize: buffer.length,
-            duration,
-            mimeType: "video/webm",
-            status: "completed",
-          }).returning();
+          const [recording] = await db
+            .insert(meetingRecordings)
+            .values({
+              roomId,
+              meetingId: meeting?.id || null,
+              hostId: hostId ? parseInt(hostId) : null,
+              filename,
+              originalFilename,
+              fileSize: buffer.length,
+              duration,
+              mimeType: uploadedMimeType || "video/webm",
+              status: "completed",
+            })
+            .returning();
 
-          log(`Recording saved: ${filename} (${buffer.length} bytes)`, "recordings");
+          log(
+            `Recording saved: ${filename} (${buffer.length} bytes, mime=${uploadedMimeType})`,
+            "recordings",
+          );
           res.json({ success: true, recording });
         } catch (error: any) {
           log(`Error saving recording: ${error.message}`, "recordings");

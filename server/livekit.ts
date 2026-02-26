@@ -1,4 +1,5 @@
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { EgressClient } from "livekit-server-sdk";
 
 interface LiveKitConfig {
   apiKey: string;
@@ -26,6 +27,24 @@ const USAGE_WARNING_THRESHOLD = 9000;
 const USAGE_LIMIT = 10000;
 
 const roomHosts = new Map<string, string>();
+
+let egressClient: EgressClient | null = null;
+
+if (primaryConfig) {
+  egressClient = new EgressClient(
+    primaryConfig.url,
+    primaryConfig.apiKey,
+    primaryConfig.apiSecret
+  );
+} else if (fallbackConfig) {
+  egressClient = new EgressClient(
+    fallbackConfig.url,
+    fallbackConfig.apiKey,
+    fallbackConfig.apiSecret
+  );
+}
+
+export { egressClient };
 
 function resetCounterIfNewMonth() {
   const today = new Date().toISOString().slice(0, 10);

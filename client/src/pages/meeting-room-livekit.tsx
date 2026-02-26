@@ -12,7 +12,7 @@ import "@livekit/components-styles";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import { useToast } from "@/hooks/use-toast";
 import { useRecording } from "@/hooks/use-recording";
-import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users } from "lucide-react";
+import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users, ChevronUp, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ParticipantTile } from "@/components/meeting/participant-tile";
@@ -42,58 +42,79 @@ function MeetingContent({
   const { localParticipant } = useLocalParticipant();
   const { toast } = useToast();
 
+  // Paged scroll: page 0 = first 2 participants (full screen), page 1+ = overflow participants
+  const [currentPage, setCurrentPage] = useState(0);
+
+  // Always show first 2 on page 0; remaining on page 1 (2 per page after that)
+  const FIRST_PAGE_COUNT = 2;
+  const OTHER_PAGE_COUNT = 2;
+
+  const totalPages = useMemo(() => {
+    if (participants.length <= FIRST_PAGE_COUNT) return 1;
+    return 1 + Math.ceil((participants.length - FIRST_PAGE_COUNT) / OTHER_PAGE_COUNT);
+  }, [participants.length]);
+
+  const canScrollUp = currentPage > 0;
+  const canScrollDown = currentPage < totalPages - 1;
+
+  // Reset to page 0 when participant count drops to ≤ 2
+  useEffect(() => {
+    if (participants.length <= FIRST_PAGE_COUNT) setCurrentPage(0);
+  }, [participants.length]);
+
+  // Clamp page if participants leave
+  useEffect(() => {
+    if (currentPage >= totalPages) setCurrentPage(Math.max(0, totalPages - 1));
+  }, [totalPages, currentPage]);
+
+  const handleScrollUp = useCallback(() => {
+    setCurrentPage((p) => Math.max(0, p - 1));
+  }, []);
+
+  const handleScrollDown = useCallback(() => {
+    setCurrentPage((p) => Math.min(totalPages - 1, p + 1));
+  }, [totalPages]);
+
+  // Participants to show on the current page
+  const visibleParticipants = useMemo(() => {
+    if (currentPage === 0) return participants.slice(0, FIRST_PAGE_COUNT);
+    const start = FIRST_PAGE_COUNT + (currentPage - 1) * OTHER_PAGE_COUNT;
+    return participants.slice(start, start + OTHER_PAGE_COUNT);
+  }, [participants, currentPage]);
+
   // ✅ Called at record-start (not hook init) so tracks are definitely subscribed.
-  // Returns the raw decoded WebRTC audio MediaStreamTracks for all remote participants.
   const getRemoteAudioTracks = useCallback((): MediaStreamTrack[] => {
     const tracks: MediaStreamTrack[] = [];
+    const localMicPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+    const localMicTrack = localMicPub?.track?.mediaStreamTrack;
+    if (localMicTrack && localMicTrack.readyState === "live") tracks.push(localMicTrack);
     room.remoteParticipants.forEach((participant) => {
       const pub = participant.getTrackPublication(Track.Source.Microphone);
       const track = pub?.track?.mediaStreamTrack;
-      if (track && track.readyState === "live") {
-        tracks.push(track);
-      }
+      if (track && track.readyState === "live") tracks.push(track);
     });
     console.log("[Meeting] getRemoteAudioTracks called, found:", tracks.length);
     return tracks;
   }, [room]);
 
-  // All video tracks that should appear in the recording grid (local + remote cameras/screenshare).
   const getCompositeVideoTracks = useCallback((): MediaStreamTrack[] => {
     const tracks: MediaStreamTrack[] = [];
-
-    // Optionally prefer screen share as primary content if present.
     room.remoteParticipants.forEach((participant) => {
       const pub = participant.getTrackPublication(Track.Source.ScreenShare);
       const track = pub?.track?.mediaStreamTrack;
-      if (track && track.readyState === "live") {
-        tracks.push(track);
-      }
+      if (track && track.readyState === "live") tracks.push(track);
     });
-
-    const localScreenPub = room.localParticipant.getTrackPublication(
-      Track.Source.ScreenShare
-    );
+    const localScreenPub = room.localParticipant.getTrackPublication(Track.Source.ScreenShare);
     const localScreenTrack = localScreenPub?.track?.mediaStreamTrack;
-    if (localScreenTrack && localScreenTrack.readyState === "live") {
-      tracks.unshift(localScreenTrack);
-    }
-
-    const localCameraPub = room.localParticipant.getTrackPublication(
-      Track.Source.Camera
-    );
+    if (localScreenTrack && localScreenTrack.readyState === "live") tracks.unshift(localScreenTrack);
+    const localCameraPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
     const localCameraTrack = localCameraPub?.track?.mediaStreamTrack;
-    if (localCameraTrack && localCameraTrack.readyState === "live") {
-      tracks.push(localCameraTrack);
-    }
-
+    if (localCameraTrack && localCameraTrack.readyState === "live") tracks.push(localCameraTrack);
     room.remoteParticipants.forEach((participant) => {
       const pub = participant.getTrackPublication(Track.Source.Camera);
       const track = pub?.track?.mediaStreamTrack;
-      if (track && track.readyState === "live") {
-        tracks.push(track);
-      }
+      if (track && track.readyState === "live") tracks.push(track);
     });
-
     console.log("[Meeting] getCompositeVideoTracks called, found:", tracks.length);
     return tracks;
   }, [room]);
@@ -105,9 +126,10 @@ function MeetingContent({
     pauseRecording,
     resumeRecording,
     stopRecording,
+    onTracksChanged,
   } = useRecording({
     roomId,
-    getRemoteAudioTracks, // ✅ callback — called when recording actually starts
+    getRemoteAudioTracks,
     getCompositeVideoTracks,
     onRecordingComplete: () => {
       toast({
@@ -297,16 +319,26 @@ function MeetingContent({
       }
     };
     const handleScreenShareChange = () => setIsScreenSharing(localParticipant.isScreenShareEnabled);
+    const handleTracksChanged = () => { onTracksChanged(); };
 
     room.on(RoomEvent.ConnectionStateChanged, handleConnectionStateChange);
     room.on(RoomEvent.LocalTrackPublished, handleScreenShareChange);
     room.on(RoomEvent.LocalTrackUnpublished, handleScreenShareChange);
+    room.on(RoomEvent.TrackPublished, handleTracksChanged);
+    room.on(RoomEvent.TrackUnpublished, handleTracksChanged);
+    room.on(RoomEvent.LocalTrackPublished, handleTracksChanged);
+    room.on(RoomEvent.LocalTrackUnpublished, handleTracksChanged);
+
     return () => {
       room.off(RoomEvent.ConnectionStateChanged, handleConnectionStateChange);
       room.off(RoomEvent.LocalTrackPublished, handleScreenShareChange);
       room.off(RoomEvent.LocalTrackUnpublished, handleScreenShareChange);
+      room.off(RoomEvent.TrackPublished, handleTracksChanged);
+      room.off(RoomEvent.TrackUnpublished, handleTracksChanged);
+      room.off(RoomEvent.LocalTrackPublished, handleTracksChanged);
+      room.off(RoomEvent.LocalTrackUnpublished, handleTracksChanged);
     };
-  }, [room, localParticipant, toast, isReconnecting]);
+  }, [room, localParticipant, toast, isReconnecting, onTracksChanged]);
 
   const handleToggleAudio = useCallback(async () => {
     try {
@@ -331,6 +363,20 @@ function MeetingContent({
   const handleToggleScreenShare = useCallback(async () => {
     try {
       const newState = !isScreenSharing;
+      if (newState) {
+        const canShare =
+          typeof navigator !== "undefined" &&
+          !!navigator.mediaDevices &&
+          typeof navigator.mediaDevices.getDisplayMedia === "function";
+        if (!canShare) {
+          toast({
+            title: "Screen Sharing Not Supported",
+            description: "Your browser or device does not support screen sharing. Please try on a desktop browser like Chrome or Edge.",
+            variant: "destructive",
+          });
+          return;
+        }
+      }
       await localParticipant.setScreenShareEnabled(newState);
       setIsScreenSharing(newState);
       if (newState) toast({ title: "Screen Sharing", description: "You are now sharing your screen" });
@@ -387,14 +433,14 @@ function MeetingContent({
   const handleMuteAll = useCallback(async () => {
     const remote = participants.filter((p) => p.identity !== localParticipant.identity);
     let count = 0;
-    for (const p of remote) { try { await handleMuteParticipant(p.identity, "audio", true); count++; } catch {} }
+    for (const p of remote) { try { await handleMuteParticipant(p.identity, "audio", true); count++; } catch { } }
     toast({ title: "Muted All", description: `Muted ${count} participant(s)` });
   }, [participants, localParticipant.identity, handleMuteParticipant, toast]);
 
   const handleDisableAllCameras = useCallback(async () => {
     const remote = participants.filter((p) => p.identity !== localParticipant.identity);
     let count = 0;
-    for (const p of remote) { try { await handleMuteParticipant(p.identity, "video", true); count++; } catch {} }
+    for (const p of remote) { try { await handleMuteParticipant(p.identity, "video", true); count++; } catch { } }
     toast({ title: "Cameras Disabled", description: `Disabled cameras for ${count} participant(s)` });
   }, [participants, localParticipant.identity, handleMuteParticipant, toast]);
 
@@ -404,23 +450,40 @@ function MeetingContent({
   }, [isRoomLocked, toast]);
 
   const handleEndMeeting = useCallback(async () => {
-    try { await fetch(`/api/meetings/${roomId}/end`, { method: "PATCH" }); } catch {}
+    try { await fetch(`/api/meetings/${roomId}/end`, { method: "PATCH" }); } catch { }
     toast({ title: "Meeting Ended", description: "All participants have been disconnected" });
     onLeave();
   }, [roomId, onLeave, toast]);
 
+  // Grid layout: always fill the full available height
   const gridClass = useMemo(() => {
-    const count = participants.length;
     if (screenShareTrack) return "grid-cols-1";
-    if (count === 1) return "grid-cols-1 max-w-5xl mx-auto min-h-[70vh]";
-    if (count === 2) return "grid-cols-1 sm:grid-cols-2 max-w-8xl mx-auto min-h-[70vh] mt-12";
-    if (count <= 4) return "grid-cols-2";
-    if (count <= 6) return "grid-cols-2 sm:grid-cols-3";
-    return "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4";
-  }, [participants.length, screenShareTrack]);
+    if (visibleParticipants.length === 1) return "grid-cols-1";
+    return "grid-cols-1 sm:grid-cols-2";
+  }, [visibleParticipants.length, screenShareTrack]);
+
+  // Show page indicator + scroll buttons only when there are more than 2 participants
+  const showScrollButtons = participants.length > 2;
 
   return (
     <div className="flex flex-col h-screen bg-background">
+      <style>{`
+        .lk-participant-tile {
+          height: 100% !important;
+          max-height: none !important;
+          aspect-ratio: unset !important;
+          min-height: 0 !important;
+        }
+        .lk-participant-tile video {
+          height: 100% !important;
+          width: 100% !important;
+          object-fit: cover !important;
+          aspect-ratio: unset !important;
+        }
+        .lk-focus-layout, .lk-grid-layout {
+          height: 100% !important;
+        }
+      `}</style>
       <header id="meeting-header" className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-card shrink-0 z-30">
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-semibold hidden sm:block">பேசு தமிழ்</h1>
@@ -430,37 +493,94 @@ function MeetingContent({
               <Crown className="w-3 h-3 mr-1" />Host
             </Badge>
           )}
+          {showScrollButtons && (
+            <Badge variant="outline" className="text-xs tabular-nums">
+              {currentPage + 1} / {totalPages}
+            </Badge>
+          )}
         </div>
         <Button onClick={handleCopyLink} variant="outline" size="sm" data-testid="button-share-meeting">
           {copied ? <><Check className="w-4 h-4 mr-2" />Copied!</> : <><Link2 className="w-4 h-4 mr-2" />Share</>}
         </Button>
       </header>
 
-      <main className="flex-1 overflow-auto p-2 sm:p-4 pb-24">
-        {screenShareTrack && (
-          <div className="mb-4">
-            <ParticipantTile participant={screenShareTrack.participant} videoTrack={screenShareTrack.publication} isScreenShare={true} />
-          </div>
-        )}
-        <div className={cn("grid gap-2 sm:gap-4", gridClass)}>
-          {participants.map((participant) => {
-            const videoTrack = participant.getTrackPublication(Track.Source.Camera);
-            const audioTrack = participant.getTrackPublication(Track.Source.Microphone);
-            const isLocal = participant.identity === localParticipant.identity;
-            return (
-              <ParticipantTile key={participant.identity} participant={participant} videoTrack={videoTrack} audioTrack={audioTrack} isLocal={isLocal} />
-            );
-          })}
-        </div>
-        {participants.length === 0 && (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center text-muted-foreground">
-              <p>Waiting for others to join...</p>
-              <p className="text-sm mt-2">Share the meeting link to invite participants</p>
+      {/* Main content area — fills remaining height, no scroll, paged */}
+      <div className="flex flex-1 overflow-hidden relative">
+        <main className="flex-1 overflow-hidden flex flex-col" style={{ padding: "8px 8px 96px 8px" }}>
+          {screenShareTrack && (
+            <div className="mb-2 flex-shrink-0" style={{ height: "calc(100% - 1rem)" }}>
+              <ParticipantTile participant={screenShareTrack.participant} videoTrack={screenShareTrack.publication} isScreenShare={true} />
             </div>
+          )}
+          {/* Participant tiles — force full height fill */}
+          <div
+            className={cn("grid gap-2 flex-1 min-h-0 w-full", gridClass)}
+            style={{ gridAutoRows: "1fr" }}
+          >
+            {visibleParticipants.map((participant) => {
+              const videoTrack = participant.getTrackPublication(Track.Source.Camera);
+              const audioTrack = participant.getTrackPublication(Track.Source.Microphone);
+              const isLocal = participant.identity === localParticipant.identity;
+              return (
+                <div
+                  key={participant.identity}
+                  style={{
+                    position: "relative",
+                    width: "100%",
+                    height: "100%",
+                    minHeight: 0,
+                  }}
+                  className="[&>*]:!absolute [&>*]:!inset-0 [&>*]:!w-full [&>*]:!h-full [&>*]:!max-h-none [&>*]:!aspect-auto"
+                >
+                  <ParticipantTile participant={participant} videoTrack={videoTrack} audioTrack={audioTrack} isLocal={isLocal} />
+                </div>
+              );
+            })}
+          </div>
+          {participants.length === 0 && (
+            <div className="flex items-center justify-center flex-1">
+              <div className="text-center text-muted-foreground">
+                <p>Waiting for others to join...</p>
+                <p className="text-sm mt-2">Share the meeting link to invite participants</p>
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* Page scroll buttons — right side, vertically centered, only when > 2 participants */}
+        {showScrollButtons && (
+          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-20">
+            <button
+              onClick={handleScrollUp}
+              disabled={!canScrollUp}
+              className={cn(
+                "w-10 h-10 rounded-full flex items-center justify-center shadow-lg transition-all duration-200",
+                "bg-background/90 backdrop-blur-sm border border-border",
+                canScrollUp
+                  ? "opacity-100 hover:bg-accent hover:scale-105 cursor-pointer"
+                  : "opacity-25 cursor-not-allowed"
+              )}
+              aria-label="Previous participants"
+            >
+              <ChevronUp className="w-5 h-5 text-foreground" />
+            </button>
+            <button
+              onClick={handleScrollDown}
+              disabled={!canScrollDown}
+              className={cn(
+                "w-10 h-10 rounded-full flex items-center justify-center shadow-lg transition-all duration-200",
+                "bg-background/90 backdrop-blur-sm border border-border",
+                canScrollDown
+                  ? "opacity-100 hover:bg-accent hover:scale-105 cursor-pointer"
+                  : "opacity-25 cursor-not-allowed"
+              )}
+              aria-label="Next participants"
+            >
+              <ChevronDown className="w-5 h-5 text-foreground" />
+            </button>
           </div>
         )}
-      </main>
+      </div>
 
       <ParticipantsPanel participants={participants} localParticipantId={localParticipant.identity} isOpen={isParticipantsPanelOpen} onClose={() => setIsParticipantsPanelOpen(false)} roomId={roomId} isHost={isHost} onMuteParticipant={handleMuteParticipant} raisedHands={raisedHands} reactions={reactions} />
       <ChatPanel isOpen={isChatPanelOpen} onClose={() => setIsChatPanelOpen(false)} messages={chatMessages} onSendMessage={handleSendChatMessage} localParticipantId={localParticipant.identity} localParticipantName={localParticipant.name || localParticipant.identity} />

@@ -18,7 +18,7 @@ export function useMediaDevices() {
     const stored = sessionStorage.getItem("audioEnabled");
     return stored !== null ? stored === "true" : true;
   };
-  
+
   const getInitialVideoEnabled = () => {
     const stored = sessionStorage.getItem("videoEnabled");
     return stored !== null ? stored === "true" : true;
@@ -65,23 +65,32 @@ export function useMediaDevices() {
       }
 
       const constraints: MediaStreamConstraints = {
-        audio: audioDeviceId ? { deviceId: { exact: audioDeviceId } } : true,
-        video: videoDeviceId
-          ? { deviceId: { exact: videoDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          : { width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: {
+          deviceId: audioDeviceId ? { exact: audioDeviceId } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000,
+        },
+        video: {
+          deviceId: videoDeviceId ? { exact: videoDeviceId } : undefined,
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30 },
+        },
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       localStreamRef.current = stream;
-      
+
       const initialAudioEnabled = getInitialAudioEnabled();
       const initialVideoEnabled = getInitialVideoEnabled();
-      
+
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
         audioTrack.enabled = initialAudioEnabled;
       }
-      
+
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.enabled = initialVideoEnabled;
@@ -101,8 +110,8 @@ export function useMediaDevices() {
       const errorMessage = err.name === "NotAllowedError"
         ? "Camera and microphone access was denied. Please allow access to join the meeting."
         : err.name === "NotFoundError"
-        ? "No camera or microphone found. Please connect a device."
-        : "Failed to access camera and microphone.";
+          ? "No camera or microphone found. Please connect a device."
+          : "Failed to access camera and microphone.";
 
       setState((prev) => ({
         ...prev,

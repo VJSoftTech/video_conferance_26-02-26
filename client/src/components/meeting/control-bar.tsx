@@ -1,11 +1,11 @@
 import { Button } from "@/components/ui/button";
-import { 
-  Mic, 
-  MicOff, 
-  Video, 
-  VideoOff, 
-  MonitorUp, 
-  PhoneOff, 
+import {
+  Mic,
+  MicOff,
+  Video,
+  VideoOff,
+  MonitorUp,
+  PhoneOff,
   Users,
   MoreVertical,
   Crown,
@@ -110,11 +110,11 @@ export function ControlBar({
 }: ControlBarProps) {
   const { toast } = useToast();
   const [isReactionPopoverOpen, setIsReactionPopoverOpen] = useState(false);
-  
+
   const isScreenShareSupported = useMemo(() => {
-    return typeof navigator !== 'undefined' && 
-           navigator.mediaDevices && 
-           typeof navigator.mediaDevices.getDisplayMedia === 'function';
+    return typeof navigator !== 'undefined' &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getDisplayMedia === 'function';
   }, []);
 
   const handleScreenShareClick = () => {
@@ -353,7 +353,7 @@ export function ControlBar({
                   recordingState === "recording" ? "bg-red-500 animate-pulse" : "bg-yellow-500"
                 )} />
                 <span className="text-xs font-mono text-red-500 min-w-[40px]">{recordingDuration}</span>
-                
+
                 {recordingState === "recording" && onPauseRecording && (
                   <TooltipProvider>
                     <Tooltip>
@@ -372,7 +372,7 @@ export function ControlBar({
                     </Tooltip>
                   </TooltipProvider>
                 )}
-                
+
                 {recordingState === "paused" && onResumeRecording && (
                   <TooltipProvider>
                     <Tooltip>
@@ -391,7 +391,7 @@ export function ControlBar({
                     </Tooltip>
                   </TooltipProvider>
                 )}
-                
+
                 {onStopRecording && (
                   <TooltipProvider>
                     <Tooltip>
@@ -464,7 +464,7 @@ export function ControlBar({
                   <DropdownMenuSeparator />
                 </>
               )}
-              <DropdownMenuItem 
+              <DropdownMenuItem
                 onClick={handleScreenShareClick}
                 className={!isScreenShareSupported ? "opacity-50" : ""}
               >
@@ -473,10 +473,10 @@ export function ControlBar({
                 ) : (
                   <MonitorOff className="w-4 h-4 mr-2" />
                 )}
-                {!isScreenShareSupported 
-                  ? "Screen Share (Desktop Only)" 
-                  : isScreenSharing 
-                    ? "Stop Sharing" 
+                {!isScreenShareSupported
+                  ? "Screen Share (Desktop Only)"
+                  : isScreenSharing
+                    ? "Stop Sharing"
                     : "Share Screen"}
               </DropdownMenuItem>
               {onToggleChat && (

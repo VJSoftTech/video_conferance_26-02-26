@@ -10,17 +10,15 @@ interface UseRecordingOptions {
   onError?: (error: Error) => void;
   onRecordingStarted?: () => void;
   onRecordingStopped?: () => void;
-  // Passed from the meeting room so we can pull remote audio tracks at record-time
-  // (not at hook-init time, which is too early — tracks may not be subscribed yet)
+  // Remote participant audio tracks (decoded WebRTC MediaStreamTracks).
   getRemoteAudioTracks?: () => MediaStreamTrack[];
   // All video tracks (local + remote) that should appear in the recording grid.
-  // We only ever draw these tracks to an offscreen canvas — no header/footer/controls.
   getCompositeVideoTracks?: () => MediaStreamTrack[];
 }
 
 function isMobileDevice(): boolean {
   return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
-    navigator.userAgent
+    navigator.userAgent,
   );
 }
 
@@ -34,13 +32,12 @@ function getBestVideoMimeType(): string {
   return types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
 }
 
-// Returns mimeType + correct extension for pure audio recording
 function getBestMobileAudioFormat(): { mimeType: string; ext: string } {
   const candidates = [
-    { mimeType: "audio/mp4", ext: "m4a" }, // iOS Safari 14.3+
-    { mimeType: "audio/webm;codecs=opus", ext: "webm" }, // Android Chrome
-    { mimeType: "audio/webm", ext: "webm" }, // Android fallback
-    { mimeType: "audio/ogg;codecs=opus", ext: "ogg" }, // Firefox Android
+    { mimeType: "audio/mp4", ext: "m4a" },
+    { mimeType: "audio/webm;codecs=opus", ext: "webm" },
+    { mimeType: "audio/webm", ext: "webm" },
+    { mimeType: "audio/ogg;codecs=opus", ext: "ogg" },
     { mimeType: "audio/ogg", ext: "ogg" },
   ];
   for (const c of candidates) {
@@ -50,7 +47,6 @@ function getBestMobileAudioFormat(): { mimeType: string; ext: string } {
       // ignore
     }
   }
-  // Last resort — let browser pick, save as webm
   return { mimeType: "", ext: "webm" };
 }
 
@@ -96,8 +92,8 @@ export function useRecording({
         setDuration(
           Math.floor(
             (Date.now() - startTimeRef.current - pausedTimeRef.current) /
-              1000
-          )
+            1000,
+          ),
         );
       }
     }, 1000);
@@ -113,9 +109,9 @@ export function useRecording({
   const getFinalDuration = useCallback(
     () =>
       Math.floor(
-        (Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000
+        (Date.now() - startTimeRef.current - pausedTimeRef.current) / 1000,
       ),
-    []
+    [],
   );
 
   const cleanupAudio = useCallback(() => {
@@ -148,7 +144,6 @@ export function useRecording({
         // ignore
       }
       if (videoEl.srcObject instanceof MediaStream) {
-        // We DO NOT stop the underlying tracks — they belong to LiveKit.
         videoEl.srcObject = null;
       }
       if (videoEl.isConnected) {
@@ -170,6 +165,7 @@ export function useRecording({
             "x-host-id": hostId?.toString() || "",
             "x-duration": finalDuration.toString(),
             "x-original-filename": filename,
+            "x-mime-type": blob.type || "",
           },
           body: blob,
         });
@@ -184,22 +180,15 @@ export function useRecording({
       setDuration(0);
       chunksRef.current = [];
     },
-    [roomId, hostId, onRecordingComplete, onError, onRecordingStopped, setStateSynced]
+    [roomId, hostId, onRecordingComplete, onError, onRecordingStopped, setStateSynced],
   );
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // SHARED HELPERS
-  // - We never use getDisplayMedia.
-  // - Video is rendered to an offscreen <canvas> from LiveKit video tracks.
-  // - Audio is mixed from remote participant audio tracks only (no local mic).
-  // ══════════════════════════════════════════════════════════════════════════
 
   const createMixedRemoteAudioStream = useCallback(
     async (): Promise<MediaStream | null> => {
       const remoteTracks = getRemoteAudioTracks?.() ?? [];
       console.log(
         "[Recording] Remote audio tracks at record-start:",
-        remoteTracks.length
+        remoteTracks.length,
       );
 
       if (!remoteTracks.length) {
@@ -230,7 +219,7 @@ export function useRecording({
           } catch (e) {
             console.warn(
               "[Recording] Could not connect remote audio track:",
-              e
+              e,
             );
           }
         }
@@ -241,44 +230,37 @@ export function useRecording({
         destination.stream.getAudioTracks().length === 0
       ) {
         console.warn(
-          "[Recording] No remote audio tracks connected for recording."
+          "[Recording] No remote audio tracks connected for recording.",
         );
         return null;
       }
 
       console.log(
         "[Recording] Remote audio tracks connected:",
-        remoteConnected
+        remoteConnected,
       );
       return destination.stream;
     },
-    [getRemoteAudioTracks]
+    [getRemoteAudioTracks],
   );
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // CANVAS-BASED VIDEO + REMOTE AUDIO RECORDING (desktop + mobile)
-  // - Draws only meeting video tiles (no header/footer/controls).
-  // - Does not capture the mouse cursor.
-  // ══════════════════════════════════════════════════════════════════════════
 
   const startCanvasRecording = useCallback(async () => {
     const mimeType = getBestVideoMimeType();
     if (!mimeType) {
       throw new Error(
-        "No supported video recording format. Please use a modern browser like Chrome or Firefox."
+        "No supported video recording format. Please use a modern browser like Chrome or Firefox.",
       );
     }
 
     const videoTracks = getCompositeVideoTracks?.() ?? [];
     const liveVideoTracks = videoTracks.filter(
-      (t) => t.readyState === "live"
+      (t) => t.readyState === "live",
     );
 
     if (!liveVideoTracks.length) {
       throw new Error("No participant video tracks available to record.");
     }
 
-    // Create hidden <video> elements for each track so we can draw them to a canvas.
     const videoEls: HTMLVideoElement[] = [];
     for (const track of liveVideoTracks) {
       const el = document.createElement("video");
@@ -292,13 +274,11 @@ export function useRecording({
       el.style.height = "1px";
       document.body.appendChild(el);
       try {
-        // User gesture (record button) should allow autoplay even off-DOM, but
-        // some mobile browsers are picky, so we attach to DOM and call play().
         await el.play();
       } catch (e) {
         console.warn(
           "[Recording] Could not autoplay video track for canvas:",
-          e
+          e,
         );
       }
       videoEls.push(el);
@@ -307,23 +287,28 @@ export function useRecording({
     if (!videoEls.length) {
       cleanupCanvas();
       throw new Error(
-        "No playable participant video tracks available for recording."
+        "No playable participant video tracks available for recording.",
       );
     }
 
     videoElementsRef.current = videoEls;
 
     const canvas = document.createElement("canvas");
-    // 16:9 HD canvas — independent from actual DOM layout.
-    canvas.width = 1280;
-    canvas.height = 720;
+    // Use 16:9 canvas, but adapt orientation to the device so mobile portrait
+    // recordings don't look rotated or overly pillarboxed.
+    const baseWidth = 1280;
+    const baseHeight = 720;
+    const isPortrait =
+      typeof window !== "undefined" && window.innerHeight > window.innerWidth;
+    canvas.width = isPortrait ? baseHeight : baseWidth;
+    canvas.height = isPortrait ? baseWidth : baseHeight;
     canvasRef.current = canvas;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       cleanupCanvas();
       throw new Error(
-        "Canvas is not supported for recording in this browser."
+        "Canvas is not supported for recording in this browser.",
       );
     }
 
@@ -341,7 +326,30 @@ export function useRecording({
           const col = index % cols;
           const x = col * tileWidth;
           const y = row * tileHeight;
-          ctx.drawImage(videoEl, x, y, tileWidth, tileHeight);
+
+          const vw = videoEl.videoWidth || 1280;
+          const vh = videoEl.videoHeight || 720;
+          const videoAspect = vw / vh;
+          const tileAspect = tileWidth / tileHeight;
+
+          let renderWidth = tileWidth;
+          let renderHeight = tileHeight;
+          let offsetX = x;
+          let offsetY = y;
+
+          if (videoAspect > tileAspect) {
+            // Video is wider than tile: fit width, letterbox vertically.
+            renderWidth = tileWidth;
+            renderHeight = tileWidth / videoAspect;
+            offsetY = y + (tileHeight - renderHeight) / 2;
+          } else {
+            // Video is taller than tile: fit height, letterbox horizontally.
+            renderHeight = tileHeight;
+            renderWidth = tileHeight * videoAspect;
+            offsetX = x + (tileWidth - renderWidth) / 2;
+          }
+
+          ctx.drawImage(videoEl, offsetX, offsetY, renderWidth, renderHeight);
         }
       });
       canvasAnimationFrameRef.current = requestAnimationFrame(drawFrame);
@@ -349,14 +357,13 @@ export function useRecording({
 
     drawFrame();
 
-    // Some older mobile browsers may not implement captureStream; guard it.
     const capture = (canvas as any).captureStream?.bind(canvas);
     if (!capture) {
       cleanupCanvas();
       throw new Error("This browser does not support canvas-based recording.");
     }
 
-    const canvasStream: MediaStream = capture(25); // 25 FPS
+    const canvasStream: MediaStream = capture(25);
     canvasStreamRef.current = canvasStream;
 
     const audioStream = await createMixedRemoteAudioStream();
@@ -390,7 +397,7 @@ export function useRecording({
       await upload(
         blob,
         dur,
-        `meeting_${roomId}_${new Date().toISOString().slice(0, 10)}.${ext}`
+        `meeting_${roomId}_${new Date().toISOString().slice(0, 10)}.${ext}`,
       );
     };
 
@@ -410,25 +417,22 @@ export function useRecording({
     createMixedRemoteAudioStream,
   ]);
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // AUDIO-ONLY RECORDING (remote participants only; no local mic)
-  // - Used as fallback when canvas recording is not possible.
-  // ══════════════════════════════════════════════════════════════════════════
-
   const startAudioOnlyRecording = useCallback(async () => {
     const { mimeType, ext } = getBestMobileAudioFormat();
 
     const recordStream = await createMixedRemoteAudioStream();
     if (!recordStream || recordStream.getAudioTracks().length === 0) {
       cleanupAudio();
-      throw new Error("No remote participant audio tracks available to record.");
+      throw new Error(
+        "No active microphones to record. Turn on your mic or ask at least one participant to unmute, then try again.",
+      );
     }
 
     const mr = mimeType
       ? new MediaRecorder(recordStream, {
-          mimeType,
-          audioBitsPerSecond: 128_000,
-        })
+        mimeType,
+        audioBitsPerSecond: 128_000,
+      })
       : new MediaRecorder(recordStream);
 
     chunksRef.current = [];
@@ -463,28 +467,42 @@ export function useRecording({
     createMixedRemoteAudioStream,
   ]);
 
-  // ── Public API ────────────────────────────────────────────────────────────
-
   const startRecording = useCallback(async () => {
     if (typeof MediaRecorder === "undefined") {
       onError?.(new Error("Recording is not supported in this browser."));
       return;
     }
-    try {
-      onRecordingStarted?.();
 
-      // Prefer full video + audio recording via canvas.
-      try {
-        await startCanvasRecording();
-        return;
-      } catch (canvasError: any) {
-        console.warn(
-          "[Recording] Canvas-based recording failed, falling back to audio-only:",
-          canvasError
+    try {
+      // Check if we actually have anything to record (audio or video).
+      const videoTracks = getCompositeVideoTracks?.() ?? [];
+      const audioTracks = getRemoteAudioTracks?.() ?? [];
+
+      const hasVideo = videoTracks.some((t) => t.readyState === "live");
+      const hasAudio = audioTracks.some((t) => t.readyState === "live");
+
+      if (!hasVideo && !hasAudio) {
+        throw new Error(
+          "No active camera, screen share, or microphones to record. Turn on your camera or mic (or ask participants to unmute), then try again.",
         );
       }
 
-      // Fallback: audio-only from remote participants.
+      onRecordingStarted?.();
+
+      // Prefer full video + audio recording when we have video tracks.
+      if (hasVideo) {
+        try {
+          await startCanvasRecording();
+          return;
+        } catch (canvasError: any) {
+          console.warn(
+            "[Recording] Canvas-based recording failed, falling back to audio-only:",
+            canvasError,
+          );
+        }
+      }
+
+      // If we get here, either we only have audio, or canvas failed.
       await startAudioOnlyRecording();
     } catch (error: any) {
       console.error("[Recording] Start failed:", error);
@@ -499,6 +517,8 @@ export function useRecording({
     onRecordingStopped,
     onError,
     setStateSynced,
+    getCompositeVideoTracks,
+    getRemoteAudioTracks,
   ]);
 
   const pauseRecording = useCallback(() => {
@@ -522,8 +542,9 @@ export function useRecording({
     if (
       !mediaRecorderRef.current ||
       (current !== "recording" && current !== "paused")
-    )
+    ) {
       return;
+    }
 
     setStateSynced("stopping");
     stopTimer();
@@ -532,13 +553,8 @@ export function useRecording({
       mediaRecorderRef.current.stop();
     }
 
-    // Stop canvas stream (if any)
     canvasStreamRef.current?.getTracks().forEach((t) => t.stop());
     canvasStreamRef.current = null;
-
-    // ✅ Do NOT stop micStreamRef here — onstop handler cleans it up via cleanupAudio()
-    // ✅ Do NOT stop remote audio tracks — they belong to LiveKit
-    // ✅ Canvas + hidden video elements are cleaned up in the recorder's onstop handler.
   }, [stopTimer, setStateSynced]);
 
   const formatDuration = useCallback((seconds: number) => {
