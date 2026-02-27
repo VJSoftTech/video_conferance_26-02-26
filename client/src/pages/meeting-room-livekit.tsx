@@ -26,6 +26,13 @@ import { io, Socket } from "socket.io-client";
 
 const DEFAULT_LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL || "";
 
+// ✅ IMPROVED: Track toggle configuration
+const TRACK_TOGGLE_CONFIG = {
+  TIMEOUT: 8000, // 8 seconds timeout for track operations
+  RETRY_ATTEMPTS: 3,
+  RETRY_DELAY: 500,
+};
+
 function MeetingContent({
   roomId,
   serverUrl,
@@ -42,10 +49,15 @@ function MeetingContent({
   const { localParticipant } = useLocalParticipant();
   const { toast } = useToast();
 
-  // Paged scroll: page 0 = first 2 participants (full screen), page 1+ = overflow participants
+  // ✅ CONNECTION STATE TRACKING
   const [currentPage, setCurrentPage] = useState(0);
+  const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Connected);
 
-  // Always show first 2 on page 0; remaining on page 1 (2 per page after that)
+  // ✅ IMPROVED: Track toggle state to prevent multiple simultaneous requests
+  const [isTogglingAudio, setIsTogglingAudio] = useState(false);
+  const [isTogglingVideo, setIsTogglingVideo] = useState(false);
+  const toggleTimeoutRef = useRef<{ audio?: NodeJS.Timeout; video?: NodeJS.Timeout }>({});
+
   const FIRST_PAGE_COUNT = 2;
   const OTHER_PAGE_COUNT = 2;
 
@@ -57,12 +69,10 @@ function MeetingContent({
   const canScrollUp = currentPage > 0;
   const canScrollDown = currentPage < totalPages - 1;
 
-  // Reset to page 0 when participant count drops to ≤ 2
   useEffect(() => {
     if (participants.length <= FIRST_PAGE_COUNT) setCurrentPage(0);
   }, [participants.length]);
 
-  // Clamp page if participants leave
   useEffect(() => {
     if (currentPage >= totalPages) setCurrentPage(Math.max(0, totalPages - 1));
   }, [totalPages, currentPage]);
@@ -75,14 +85,12 @@ function MeetingContent({
     setCurrentPage((p) => Math.min(totalPages - 1, p + 1));
   }, [totalPages]);
 
-  // Participants to show on the current page
   const visibleParticipants = useMemo(() => {
     if (currentPage === 0) return participants.slice(0, FIRST_PAGE_COUNT);
     const start = FIRST_PAGE_COUNT + (currentPage - 1) * OTHER_PAGE_COUNT;
     return participants.slice(start, start + OTHER_PAGE_COUNT);
   }, [participants, currentPage]);
 
-  // ✅ Called at record-start (not hook init) so tracks are definitely subscribed.
   const getRemoteAudioTracks = useCallback((): MediaStreamTrack[] => {
     const tracks: MediaStreamTrack[] = [];
     const localMicPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
@@ -159,7 +167,6 @@ function MeetingContent({
   const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(false);
   const [isRoomLocked, setIsRoomLocked] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [isReconnecting, setIsReconnecting] = useState(false);
   const [isHandRaised, setIsHandRaised] = useState(false);
   const [raisedHands, setRaisedHands] = useState<Map<string, { participantName: string; timestamp: number }>>(new Map());
   const [reactions, setReactions] = useState<Array<{ id: string; emoji: string; participantName: string; timestamp: number }>>([]);
@@ -246,53 +253,92 @@ function MeetingContent({
     initMedia();
   }, [localParticipant, toast, initialAudioEnabled, initialVideoEnabled]);
 
+  // ✅ Socket initialization with error handling (NO RECONNECTION ALERTS)
   useEffect(() => {
-    const socket = io({ path: "/socket.io", transports: ["websocket", "polling"] });
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      if (isHost) socket.emit("host-presence", { roomId, isPresent: true });
-      socket.emit("join-reaction-room", { roomId });
-    });
-
-    socket.on("reaction", (data: { emoji: string; participantName: string; participantId: string }) => {
-      const reaction = { id: `${data.participantId}-${Date.now()}`, emoji: data.emoji, participantName: data.participantName, timestamp: Date.now() };
-      setReactions((prev) => [...prev, reaction]);
-      const timerId = setTimeout(() => {
-        setReactions((prev) => prev.filter((r) => r.id !== reaction.id));
-        reactionTimersRef.current.delete(reaction.id);
-      }, 3000);
-      reactionTimersRef.current.set(reaction.id, timerId);
-    });
-
-    socket.on("hand-raise-update", (data: { participantId: string; participantName: string; isRaised: boolean }) => {
-      setRaisedHands((prev) => {
-        const newMap = new Map(prev);
-        if (data.isRaised) {
-          newMap.set(data.participantId, { participantName: data.participantName, timestamp: Date.now() });
-          toast({ title: "✋ Hand Raised", description: `${data.participantName} raised their hand`, duration: 3000 });
-        } else {
-          newMap.delete(data.participantId);
-        }
-        return newMap;
-      });
-    });
-
-    socket.on("chat-message", (data: { id: string; senderId: string; senderName: string; content: string; timestamp: number }) => {
-      setChatMessages((prev) => [...prev, data]);
-      if (!isChatPanelOpenRef.current && data.senderId !== localParticipantIdRef.current) {
-        setUnreadMessageCount((c) => c + 1);
+    const initSocket = () => {
+      if (socketRef.current?.connected) {
+        return;
       }
-    });
+
+      try {
+        const socket = io({ 
+          path: "/socket.io", 
+          transports: ["websocket", "polling"],
+          reconnection: true,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          reconnectionAttempts: 5,
+        });
+
+        socket.on("connect", () => {
+          console.log("[Socket] Connected successfully");
+          if (isHost) socket.emit("host-presence", { roomId, isPresent: true });
+          socket.emit("join-reaction-room", { roomId });
+        });
+
+        socket.on("connect_error", (error) => {
+          console.error("[Socket] Connection error:", error);
+          // NO TOAST - Silent reconnection
+        });
+
+        socket.on("disconnect", (reason) => {
+          console.log("[Socket] Disconnected:", reason);
+          // NO TOAST - Silent reconnection
+        });
+
+        socket.on("error", (error) => {
+          console.error("[Socket] Socket error:", error);
+          // NO TOAST - Silent reconnection
+        });
+
+        socket.on("reaction", (data: { emoji: string; participantName: string; participantId: string }) => {
+          const reaction = { id: `${data.participantId}-${Date.now()}`, emoji: data.emoji, participantName: data.participantName, timestamp: Date.now() };
+          setReactions((prev) => [...prev, reaction]);
+          const timerId = setTimeout(() => {
+            setReactions((prev) => prev.filter((r) => r.id !== reaction.id));
+            reactionTimersRef.current.delete(reaction.id);
+          }, 3000);
+          reactionTimersRef.current.set(reaction.id, timerId);
+        });
+
+        socket.on("hand-raise-update", (data: { participantId: string; participantName: string; isRaised: boolean }) => {
+          setRaisedHands((prev) => {
+            const newMap = new Map(prev);
+            if (data.isRaised) {
+              newMap.set(data.participantId, { participantName: data.participantName, timestamp: Date.now() });
+              toast({ title: "✋ Hand Raised", description: `${data.participantName} raised their hand`, duration: 3000 });
+            } else {
+              newMap.delete(data.participantId);
+            }
+            return newMap;
+          });
+        });
+
+        socket.on("chat-message", (data: { id: string; senderId: string; senderName: string; content: string; timestamp: number }) => {
+          setChatMessages((prev) => [...prev, data]);
+          if (!isChatPanelOpenRef.current && data.senderId !== localParticipantIdRef.current) {
+            setUnreadMessageCount((c) => c + 1);
+          }
+        });
+
+        socketRef.current = socket;
+      } catch (error) {
+        console.error("[Socket] Failed to initialize:", error);
+        // NO TOAST - Silent failure
+      }
+    };
+
+    initSocket();
 
     return () => {
-      if (isHost) socket.emit("host-presence", { roomId, isPresent: false });
-      socket.disconnect();
-      socketRef.current = null;
+      if (socketRef.current) {
+        if (isHost) socketRef.current.emit("host-presence", { roomId, isPresent: false });
+        socketRef.current.disconnect();
+      }
       reactionTimersRef.current.forEach((t) => clearTimeout(t));
       reactionTimersRef.current.clear();
     };
-  }, [isHost, roomId]);
+  }, [isHost, roomId, toast]);
 
   useEffect(() => {
     const participantIds = new Set(participants.map((p) => p.identity));
@@ -306,18 +352,14 @@ function MeetingContent({
     });
   }, [participants]);
 
+  // ✅ Connection state handling (NO ALERTS)
   useEffect(() => {
     const handleConnectionStateChange = (s: ConnectionState) => {
-      if (s === ConnectionState.Reconnecting) {
-        setIsReconnecting(true);
-        toast({ title: "Reconnecting", description: "Connection lost. Attempting to reconnect..." });
-      } else if (s === ConnectionState.Connected && isReconnecting) {
-        setIsReconnecting(false);
-        toast({ title: "Reconnected", description: "Connection restored successfully!" });
-      } else if (s === ConnectionState.Disconnected) {
-        toast({ title: "Disconnected", description: "You have been disconnected from the meeting.", variant: "destructive" });
-      }
+      console.log("[Meeting] Connection state changed:", s);
+      setConnectionState(s);
+      // NO ALERTS - Just log the state change
     };
+
     const handleScreenShareChange = () => setIsScreenSharing(localParticipant.isScreenShareEnabled);
     const handleTracksChanged = () => { onTracksChanged(); };
 
@@ -338,27 +380,161 @@ function MeetingContent({
       room.off(RoomEvent.LocalTrackPublished, handleTracksChanged);
       room.off(RoomEvent.LocalTrackUnpublished, handleTracksChanged);
     };
-  }, [room, localParticipant, toast, isReconnecting, onTracksChanged]);
+  }, [room, localParticipant, toast, onTracksChanged]);
 
+  // ✅ IMPROVED: Better audio toggle with timeout
   const handleToggleAudio = useCallback(async () => {
+    if (isTogglingAudio) {
+      console.log("[Meeting] Audio toggle already in progress, ignoring request");
+      return;
+    }
+
+    setIsTogglingAudio(true);
+    
+    if (toggleTimeoutRef.current.audio) {
+      clearTimeout(toggleTimeoutRef.current.audio);
+    }
+
+    const timeoutId = setTimeout(() => {
+      console.error("[Meeting] Audio toggle timeout");
+      setIsTogglingAudio(false);
+      toast({ 
+        title: "Timeout", 
+        description: "Microphone toggle took too long. Please try again.", 
+        variant: "destructive" 
+      });
+    }, TRACK_TOGGLE_CONFIG.TIMEOUT);
+    toggleTimeoutRef.current.audio = timeoutId;
+
     try {
       const newState = !isAudioEnabled;
-      await localParticipant.setMicrophoneEnabled(newState);
+      console.log(`[Meeting] Attempting to ${newState ? "enable" : "disable"} microphone`);
+      
+      const togglePromise = localParticipant.setMicrophoneEnabled(newState);
+      await Promise.race([
+        togglePromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Microphone toggle timeout")), TRACK_TOGGLE_CONFIG.TIMEOUT - 500)
+        )
+      ]);
+      
+      console.log(`[Meeting] Microphone ${newState ? "enabled" : "disabled"} successfully`);
       setIsAudioEnabled(newState);
-    } catch {
-      toast({ title: "Error", description: "Failed to toggle microphone", variant: "destructive" });
+      sessionStorage.setItem("audioEnabled", String(newState));
+      
+      toast({
+        title: newState ? "Microphone On" : "Microphone Off",
+        description: newState ? "Your microphone is now on" : "Your microphone is now off",
+        duration: 2000,
+      });
+    } catch (error: any) {
+      console.error("[Meeting] Audio toggle error:", error);
+      setIsAudioEnabled(!isAudioEnabled);
+      
+      if (error.message?.includes("timeout")) {
+        toast({ 
+          title: "Microphone Timeout", 
+          description: "Taking too long to toggle microphone. Check your connection and try again.", 
+          variant: "destructive" 
+        });
+      } else if (error.name === "NotAllowedError") {
+        toast({ 
+          title: "Permission Denied", 
+          description: "Microphone access denied. Check your browser permissions.", 
+          variant: "destructive" 
+        });
+      } else {
+        toast({ 
+          title: "Error", 
+          description: `Failed to toggle microphone: ${error.message || "Unknown error"}`, 
+          variant: "destructive" 
+        });
+      }
+    } finally {
+      setIsTogglingAudio(false);
+      if (toggleTimeoutRef.current.audio) {
+        clearTimeout(toggleTimeoutRef.current.audio);
+        delete toggleTimeoutRef.current.audio;
+      }
     }
-  }, [isAudioEnabled, localParticipant, toast]);
+  }, [isAudioEnabled, isTogglingAudio, localParticipant, toast]);
 
+  // ✅ IMPROVED: Better video toggle with timeout
   const handleToggleVideo = useCallback(async () => {
+    if (isTogglingVideo) {
+      console.log("[Meeting] Video toggle already in progress, ignoring request");
+      return;
+    }
+
+    setIsTogglingVideo(true);
+
+    if (toggleTimeoutRef.current.video) {
+      clearTimeout(toggleTimeoutRef.current.video);
+    }
+
+    const timeoutId = setTimeout(() => {
+      console.error("[Meeting] Video toggle timeout");
+      setIsTogglingVideo(false);
+      toast({ 
+        title: "Timeout", 
+        description: "Camera toggle took too long. Please try again.", 
+        variant: "destructive" 
+      });
+    }, TRACK_TOGGLE_CONFIG.TIMEOUT);
+    toggleTimeoutRef.current.video = timeoutId;
+
     try {
       const newState = !isVideoEnabled;
-      await localParticipant.setCameraEnabled(newState);
+      console.log(`[Meeting] Attempting to ${newState ? "enable" : "disable"} camera`);
+      
+      const togglePromise = localParticipant.setCameraEnabled(newState);
+      await Promise.race([
+        togglePromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Camera toggle timeout")), TRACK_TOGGLE_CONFIG.TIMEOUT - 500)
+        )
+      ]);
+      
+      console.log(`[Meeting] Camera ${newState ? "enabled" : "disabled"} successfully`);
       setIsVideoEnabled(newState);
-    } catch {
-      toast({ title: "Error", description: "Failed to toggle camera", variant: "destructive" });
+      sessionStorage.setItem("videoEnabled", String(newState));
+      
+      toast({
+        title: newState ? "Camera On" : "Camera Off",
+        description: newState ? "Your camera is now on" : "Your camera is now off",
+        duration: 2000,
+      });
+    } catch (error: any) {
+      console.error("[Meeting] Video toggle error:", error);
+      setIsVideoEnabled(!isVideoEnabled);
+      
+      if (error.message?.includes("timeout")) {
+        toast({ 
+          title: "Camera Timeout", 
+          description: "Taking too long to toggle camera. Check your connection and try again.", 
+          variant: "destructive" 
+        });
+      } else if (error.name === "NotAllowedError") {
+        toast({ 
+          title: "Permission Denied", 
+          description: "Camera access denied. Check your browser permissions.", 
+          variant: "destructive" 
+        });
+      } else {
+        toast({ 
+          title: "Error", 
+          description: `Failed to toggle camera: ${error.message || "Unknown error"}`, 
+          variant: "destructive" 
+        });
+      }
+    } finally {
+      setIsTogglingVideo(false);
+      if (toggleTimeoutRef.current.video) {
+        clearTimeout(toggleTimeoutRef.current.video);
+        delete toggleTimeoutRef.current.video;
+      }
     }
-  }, [isVideoEnabled, localParticipant, toast]);
+  }, [isVideoEnabled, isTogglingVideo, localParticipant, toast]);
 
   const handleToggleScreenShare = useCallback(async () => {
     try {
@@ -455,14 +631,12 @@ function MeetingContent({
     onLeave();
   }, [roomId, onLeave, toast]);
 
-  // Grid layout: always fill the full available height
   const gridClass = useMemo(() => {
     if (screenShareTrack) return "grid-cols-1";
     if (visibleParticipants.length === 1) return "grid-cols-1";
     return "grid-cols-1 sm:grid-cols-2";
   }, [visibleParticipants.length, screenShareTrack]);
 
-  // Show page indicator + scroll buttons only when there are more than 2 participants
   const showScrollButtons = participants.length > 2;
 
   return (
@@ -484,6 +658,7 @@ function MeetingContent({
           height: 100% !important;
         }
       `}</style>
+
       <header id="meeting-header" className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-card shrink-0 z-30">
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-semibold hidden sm:block">பேசு தமிழ்</h1>
@@ -504,7 +679,6 @@ function MeetingContent({
         </Button>
       </header>
 
-      {/* Main content area — fills remaining height, no scroll, paged */}
       <div className="flex flex-1 overflow-hidden relative">
         <main className="flex-1 overflow-hidden flex flex-col" style={{ padding: "8px 8px 96px 8px" }}>
           {screenShareTrack && (
@@ -512,7 +686,6 @@ function MeetingContent({
               <ParticipantTile participant={screenShareTrack.participant} videoTrack={screenShareTrack.publication} isScreenShare={true} />
             </div>
           )}
-          {/* Participant tiles — force full height fill */}
           <div
             className={cn("grid gap-2 flex-1 min-h-0 w-full", gridClass)}
             style={{ gridAutoRows: "1fr" }}
@@ -547,7 +720,6 @@ function MeetingContent({
           )}
         </main>
 
-        {/* Page scroll buttons — right side, vertically centered, only when > 2 participants */}
         {showScrollButtons && (
           <div className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-20">
             <button
@@ -654,20 +826,28 @@ export default function MeetingRoomLiveKit() {
   const [isWaiting, setIsWaiting] = useState(false);
   const [error, setError] = useState("");
   const [isHost, setIsHost] = useState(false);
+  const [participantName, setParticipantName] = useState<string | null>(null);
+  const [hasCheckedStorage, setHasCheckedStorage] = useState(false);
+  const [intentionalLeave, setIntentionalLeave] = useState(false);
 
   const retryCountRef = useRef(0);
   const socketRef = useRef<Socket | null>(null);
   const visitorId = getVisitorId();
-  const participantName = sessionStorage.getItem("participantName");
   const urlParams = new URLSearchParams(window.location.search);
   const hostToken = urlParams.get("host") || undefined;
 
-  const fetchToken = useCallback(async () => {
+  useEffect(() => {
+    const storedName = sessionStorage.getItem("participantName");
+    setParticipantName(storedName);
+    setHasCheckedStorage(true);
+  }, []);
+
+  const fetchToken = useCallback(async (name: string) => {
     try {
       const response = await fetch(`/api/meetings/${params.roomId}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantName, visitorId, hostToken }),
+        body: JSON.stringify({ participantName: name, visitorId, hostToken }),
       });
       if (!response.ok) {
         const data = await response.json();
@@ -679,10 +859,16 @@ export default function MeetingRoomLiveKit() {
         setIsWaiting(true);
         setIsConnecting(false);
         if (!socketRef.current) {
-          const socket = io({ path: "/socket.io", transports: ["websocket", "polling"] });
+          const socket = io({ 
+            path: "/socket.io", 
+            transports: ["websocket", "polling"],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+          });
           socketRef.current = socket;
           socket.on("connect", () => {
-            socket.emit("join-waiting-room", { roomId: params.roomId, visitorId, displayName: participantName });
+            socket.emit("join-waiting-room", { roomId: params.roomId, visitorId, displayName: name });
           });
           socket.on("admitted", (d: { token: string; serverUrl: string }) => {
             setToken(d.token);
@@ -692,7 +878,11 @@ export default function MeetingRoomLiveKit() {
             socket.disconnect();
             socketRef.current = null;
           });
-          socket.on("host-joined", () => fetchToken());
+          socket.on("host-joined", () => fetchToken(name));
+          socket.on("connect_error", (error) => {
+            console.error("[Waiting Room Socket] Connection error:", error);
+            toast({ title: "Connection Error", description: "Failed to connect to waiting room", variant: "destructive" });
+          });
         }
         return;
       }
@@ -705,32 +895,56 @@ export default function MeetingRoomLiveKit() {
       setIsConnecting(false);
       setError("");
     } catch (err: any) {
-      if (retryCountRef.current < 3) { retryCountRef.current++; setTimeout(fetchToken, 2000); return; }
+      if (retryCountRef.current < 3) { 
+        retryCountRef.current++; 
+        setTimeout(() => fetchToken(name), 2000); 
+        return; 
+      }
       setError(err.message);
       setIsConnecting(false);
       toast({ title: "Connection Error", description: err.message, variant: "destructive" });
     }
-  }, [params.roomId, participantName, visitorId, hostToken, toast]);
+  }, [params.roomId, visitorId, hostToken, toast]);
 
   useEffect(() => {
-    if (!participantName) { setLocation(`/room/${params.roomId}/join`); return; }
+    if (!hasCheckedStorage) return;
+    
+    if (!participantName) {
+      setLocation(`/room/${params.roomId}/join`);
+      return;
+    }
+
     retryCountRef.current = 0;
-    fetchToken();
+    fetchToken(participantName);
+    
     return () => { socketRef.current?.disconnect(); socketRef.current = null; };
-  }, [params.roomId, participantName, setLocation, fetchToken]);
+  }, [params.roomId, participantName, setLocation, fetchToken, hasCheckedStorage]);
 
   const handleLeave = useCallback(() => {
+    setIntentionalLeave(true);
     sessionStorage.removeItem("participantName");
     sessionStorage.removeItem("audioEnabled");
     sessionStorage.removeItem("videoEnabled");
     setLocation("/");
   }, [setLocation]);
 
-  const handleError = useCallback((err: Error) => {
-    toast({ title: "Connection Error", description: err.message, variant: "destructive" });
-  }, [toast]);
+  const handleDisconnect = useCallback(() => {
+    if (!intentionalLeave) {
+      toast({ 
+        title: "Connection Lost", 
+        description: "You've been disconnected. Refresh the page to reconnect.",
+        variant: "destructive"
+      });
+    }
+  }, [intentionalLeave, toast]);
 
-  if (!participantName) return null;
+  const handleError = useCallback((err: Error) => {
+    if (!intentionalLeave) {
+      toast({ title: "Connection Error", description: err.message, variant: "destructive" });
+    }
+  }, [intentionalLeave, toast]);
+
+  if (!hasCheckedStorage || !participantName) return null;
 
   if (isConnecting) return (
     <div className="min-h-screen bg-background flex items-center justify-center" data-testid="connecting-state">
@@ -757,7 +971,7 @@ export default function MeetingRoomLiveKit() {
           <Loader2 className="w-5 h-5 animate-spin text-primary" />
           <span className="text-sm text-muted-foreground">Waiting to be admitted...</span>
         </div>
-        <Button variant="outline" className="mt-6" onClick={() => { socketRef.current?.disconnect(); socketRef.current = null; setLocation("/"); }}>
+        <Button variant="outline" className="mt-6" onClick={() => { socketRef.current?.disconnect(); socketRef.current = null; handleLeave(); }}>
           <ArrowLeft className="w-4 h-4 mr-2" />Leave Waiting Room
         </Button>
       </div>
@@ -785,7 +999,7 @@ export default function MeetingRoomLiveKit() {
   );
 
   return (
-    <LiveKitRoom token={token} serverUrl={serverUrl} connect={true} onDisconnected={handleLeave} onError={handleError} video={false} audio={false} data-testid="meeting-room-livekit">
+    <LiveKitRoom token={token} serverUrl={serverUrl} connect={true} onDisconnected={handleDisconnect} onError={handleError} video={false} audio={false} data-testid="meeting-room-livekit">
       <MeetingContent roomId={params.roomId!} serverUrl={serverUrl} onLeave={handleLeave} isHost={isHost} />
     </LiveKitRoom>
   );

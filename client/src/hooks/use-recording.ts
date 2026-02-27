@@ -294,12 +294,23 @@ export function useRecording({
     videoElementsRef.current = videoEls;
 
     const canvas = document.createElement("canvas");
-    // Use 16:9 canvas, but adapt orientation to the device so mobile portrait
-    // recordings don't look rotated or overly pillarboxed.
-    const baseWidth = 1280;
-    const baseHeight = 720;
+    
+    // ✅ FIXED: Optimize canvas size based on participant count
+    // For 2 participants: use 1280x720 (landscape 16:9)
+    // The grid will be 1x2 or 2x1, so we need height that fills completely
+    
     const isPortrait =
       typeof window !== "undefined" && window.innerHeight > window.innerWidth;
+    
+    let baseWidth = 1280;
+    let baseHeight = 720;
+    
+    // For 2 participants side-by-side, use full width/height without aspect ratio constraints
+    if (liveVideoTracks.length === 2) {
+      baseWidth = 1280;
+      baseHeight = 720;
+    }
+    
     canvas.width = isPortrait ? baseHeight : baseWidth;
     canvas.height = isPortrait ? baseWidth : baseHeight;
     canvasRef.current = canvas;
@@ -327,29 +338,9 @@ export function useRecording({
           const x = col * tileWidth;
           const y = row * tileHeight;
 
-          const vw = videoEl.videoWidth || 1280;
-          const vh = videoEl.videoHeight || 720;
-          const videoAspect = vw / vh;
-          const tileAspect = tileWidth / tileHeight;
-
-          let renderWidth = tileWidth;
-          let renderHeight = tileHeight;
-          let offsetX = x;
-          let offsetY = y;
-
-          if (videoAspect > tileAspect) {
-            // Video is wider than tile: fit width, letterbox vertically.
-            renderWidth = tileWidth;
-            renderHeight = tileWidth / videoAspect;
-            offsetY = y + (tileHeight - renderHeight) / 2;
-          } else {
-            // Video is taller than tile: fit height, letterbox horizontally.
-            renderHeight = tileHeight;
-            renderWidth = tileHeight * videoAspect;
-            offsetX = x + (tileWidth - renderWidth) / 2;
-          }
-
-          ctx.drawImage(videoEl, offsetX, offsetY, renderWidth, renderHeight);
+          // ✅ FIXED: Remove letterboxing - stretch video to fill entire tile
+          // This ensures 100% height and width usage
+          ctx.drawImage(videoEl, x, y, tileWidth, tileHeight);
         }
       });
       canvasAnimationFrameRef.current = requestAnimationFrame(drawFrame);
@@ -586,4 +577,3 @@ export function useRecording({
     isScreenRecording: recordingMode === "screen",
   };
 }
-
