@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Participant, TrackPublication } from "livekit-client";
+import { Participant, TrackPublication, Track } from "livekit-client";
 import { Mic, MicOff, VideoOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -23,7 +23,7 @@ function getInitials(name: string): string {
 function getAvatarColor(name: string): string {
   const colors = [
     "bg-blue-500",
-    "bg-green-500", 
+    "bg-green-500",
     "bg-purple-500",
     "bg-orange-500",
     "bg-pink-500",
@@ -53,81 +53,83 @@ export function ParticipantTile({
 
   const isAudioMuted = !audioTrack || audioTrack.isMuted;
 
-  // Simple polling-based track attachment that works reliably
+  // Optimized track attachment: immediate and event-driven
   useEffect(() => {
     const videoEl = videoRef.current;
-    if (!videoEl) return;
+    if (!videoEl || !videoTrack) return;
 
-    const attemptAttach = () => {
-      const track = videoTrack?.track;
-      const isMuted = videoTrack?.isMuted ?? true;
-      const isSubscribedOrLocal = isLocal || videoTrack?.isSubscribed;
-      
+    const attachmentHandle = {
+      attachedTrack: null as any
+    };
+
+    const updateAttachment = () => {
+      const track = videoTrack.track;
+      const isMuted = videoTrack.isMuted;
+      const isSubscribedOrLocal = isLocal || videoTrack.isSubscribed || !!track;
+
       if (track && !isMuted && isSubscribedOrLocal) {
-        // Only attach if not already attached
-        if (attachedTrackRef.current !== track) {
-          // Detach previous track if any
-          if (attachedTrackRef.current) {
-            attachedTrackRef.current.detach(videoEl);
+        if (attachmentHandle.attachedTrack !== track) {
+          if (attachmentHandle.attachedTrack) {
+            attachmentHandle.attachedTrack.detach(videoEl);
           }
-          
           track.attach(videoEl);
-          attachedTrackRef.current = track;
-          
-          // Mirror all camera videos (not screen shares)
-          if (!isScreenShare) {
-            videoEl.style.transform = 'scaleX(-1)';
-            videoEl.style.webkitTransform = 'scaleX(-1)';
-          } else {
-            videoEl.style.transform = 'scaleX(1)';
-            videoEl.style.webkitTransform = 'scaleX(1)';
+          // Set higher priority for active video tracks to ensure fast and high-quality delivery
+          if (track.setPriority) {
+            track.setPriority(Track.Priority.High);
           }
-          
+          attachmentHandle.attachedTrack = track;
+
+          // Apply mirroring
+          const transform = !isScreenShare ? 'scaleX(-1)' : 'scaleX(1)';
+          videoEl.style.transform = transform;
+          videoEl.style.webkitTransform = transform;
+
           setHasVideo(true);
         }
-        return true;
       } else {
-        // Track not available or muted - detach if attached
-        if (attachedTrackRef.current) {
-          attachedTrackRef.current.detach(videoEl);
-          attachedTrackRef.current = null;
+        if (attachmentHandle.attachedTrack) {
+          attachmentHandle.attachedTrack.detach(videoEl);
+          attachmentHandle.attachedTrack = null;
         }
         setHasVideo(false);
-        return false;
       }
     };
 
-    // Try immediately
-    const attached = attemptAttach();
-    
-    // If not attached, poll for track availability
-    let interval: NodeJS.Timeout | null = null;
-    let timeout: NodeJS.Timeout | null = null;
-    
-    if (!attached && videoTrack) {
-      interval = setInterval(() => {
-        if (attemptAttach()) {
-          if (interval) clearInterval(interval);
-        }
-      }, 50); // Check every 50ms
-      
-      // Stop polling after 5 seconds
-      timeout = setTimeout(() => {
-        if (interval) clearInterval(interval);
-      }, 5000);
-    }
+    // Initial attempt
+    updateAttachment();
+
+    // Listen for track changes on the publication
+    // LiveKit publications emit events when tracks are assigned or state changes
+    const onSubscribed = () => updateAttachment();
+    const onUnsubscribed = () => updateAttachment();
+    const onMuted = () => updateAttachment();
+    const onUnmuted = () => updateAttachment();
+
+    // These events on TrackPublication ensure immediate reaction
+    // @ts-ignore - Accessing events
+    videoTrack.on('subscribed', onSubscribed);
+    // @ts-ignore
+    videoTrack.on('unsubscribed', onUnsubscribed);
+    // @ts-ignore
+    videoTrack.on('muted', onMuted);
+    // @ts-ignore
+    videoTrack.on('unmuted', onUnmuted);
 
     return () => {
-      if (interval) clearInterval(interval);
-      if (timeout) clearTimeout(timeout);
-      
-      // Cleanup on unmount
-      if (attachedTrackRef.current && videoEl) {
-        attachedTrackRef.current.detach(videoEl);
-        attachedTrackRef.current = null;
+      // @ts-ignore
+      videoTrack.off('subscribed', onSubscribed);
+      // @ts-ignore
+      videoTrack.off('unsubscribed', onUnsubscribed);
+      // @ts-ignore
+      videoTrack.off('muted', onMuted);
+      // @ts-ignore
+      videoTrack.off('unmuted', onUnmuted);
+
+      if (attachmentHandle.attachedTrack) {
+        attachmentHandle.attachedTrack.detach(videoEl);
       }
     };
-  }, [videoTrack, videoTrack?.track, videoTrack?.isMuted, videoTrack?.isSubscribed, isLocal]);
+  }, [videoTrack, videoTrack?.track, videoTrack?.isMuted, videoTrack?.isSubscribed, isLocal, isScreenShare]);
 
   return (
     <div

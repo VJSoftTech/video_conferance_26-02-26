@@ -43,7 +43,7 @@ function Router() {
       <Route path="/mail" component={MailPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route path="/notifications" component={NotificationsPage} />
-      <Route path="/recordings" component={RecordingsPage} />
+      <ProtectedRoute path="/recordings" component={RecordingsPage} />
       <Route path="/room/:roomId/join" component={PreJoin} />
       <Route path="/room/:roomId" component={MeetingRoomLiveKit} />
       <Route path="/auth" component={AuthPage} />

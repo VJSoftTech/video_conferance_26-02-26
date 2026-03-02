@@ -262,7 +262,7 @@ export interface ClientToServerEvents {
   "webrtc-ice-candidate": (data: any) => void;
   "host-presence": (data: { roomId: string; isPresent: boolean }) => void;
   "join-waiting-room": (data: { roomId: string; visitorId: string; displayName: string }) => void;
-  "join-reaction-room": (data: { roomId: string }) => void;
+  "join-reaction-room": (data: { roomId: string; participantId?: string }) => void;
   "send-reaction": (data: { roomId: string; emoji: string; participantId: string; participantName: string }) => void;
   "hand-raise": (data: { roomId: string; participantId: string; participantName: string; isRaised: boolean }) => void;
   "send-chat-message": (data: { roomId: string; senderId: string; senderName: string; content: string }) => void;

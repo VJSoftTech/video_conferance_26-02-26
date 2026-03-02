@@ -11,8 +11,8 @@ import path from "path";
 import fs from "fs";
 import { eq, gte, and, lte, desc } from "drizzle-orm";
 import { encryptPassword, decryptPassword, sendMeetingInvite, testSmtpConnection } from "./mail-service";
-import { 
-  type ServerToClientEvents, 
+import {
+  type ServerToClientEvents,
   type ClientToServerEvents,
   type Participant
 } from "@shared/schema";
@@ -50,6 +50,8 @@ export async function registerRoutes(
         methods: ["GET", "POST"],
       },
       path: "/socket.io",
+      pingTimeout: 60000,
+      pingInterval: 25000,
     }
   );
 
@@ -62,7 +64,7 @@ export async function registerRoutes(
 
         // Add participant to storage
         const participant = await storage.addParticipant(roomId, participantName);
-        
+
         socket.data.participantId = participant.id;
         socket.data.roomId = roomId;
 
@@ -72,6 +74,7 @@ export async function registerRoutes(
 
         // Join the socket room
         socket.join(roomId);
+        log(`Socket ${socket.id} joined room ${roomId}`, "socket.io");
 
         // Get existing participants
         const existingParticipants = await storage.getParticipantsByRoom(roomId);
@@ -94,7 +97,7 @@ export async function registerRoutes(
 
     socket.on("leave-room", async () => {
       const { participantId, roomId } = socket.data;
-      
+
       if (participantId && roomId) {
         // Remove from mappings
         participantToSocket.delete(participantId);
@@ -118,7 +121,7 @@ export async function registerRoutes(
 
     socket.on("update-participant", async (data) => {
       const { participantId, roomId } = socket.data;
-      
+
       if (participantId && roomId) {
         const updated = await storage.updateParticipant(participantId, data);
         if (updated) {
@@ -131,7 +134,7 @@ export async function registerRoutes(
     socket.on("webrtc-offer", (data) => {
       const { targetId, sdp } = data;
       const { participantId } = socket.data;
-      
+
       if (!participantId) return;
 
       const targetSocketId = participantToSocket.get(targetId);
@@ -148,7 +151,7 @@ export async function registerRoutes(
     socket.on("webrtc-answer", (data) => {
       const { targetId, sdp } = data;
       const { participantId } = socket.data;
-      
+
       if (!participantId) return;
 
       const targetSocketId = participantToSocket.get(targetId);
@@ -165,7 +168,7 @@ export async function registerRoutes(
     socket.on("webrtc-ice-candidate", (data) => {
       const { targetId, candidate } = data;
       const { participantId } = socket.data;
-      
+
       if (!participantId) return;
 
       const targetSocketId = participantToSocket.get(targetId);
@@ -181,15 +184,15 @@ export async function registerRoutes(
     // Host presence management
     socket.on("host-presence", async (data) => {
       const { roomId, isPresent } = data;
-      
+
       if (isPresent) {
         // Host joined - mark presence and admit all waiting participants
         hostPresence.set(roomId, { hostIdentity: socket.id, lastSeen: new Date() });
         log(`Host joined room ${roomId}`, "socket.io");
-        
+
         // Notify room that host joined
         io.to(`waiting:${roomId}`).emit("host-joined", { roomId });
-        
+
         // Admit all waiting participants
         const waitingSet = waitingRooms.get(roomId);
         if (waitingSet) {
@@ -200,7 +203,7 @@ export async function registerRoutes(
               try {
                 // Generate token for waiting participant
                 const result = await generateToken(roomId, waitingData.displayName);
-                
+
                 // Mark as admitted in database
                 await db.update(meetingParticipants)
                   .set({ status: 'admitted', admittedAt: new Date() })
@@ -208,20 +211,20 @@ export async function registerRoutes(
                     eq(meetingParticipants.roomId, roomId),
                     eq(meetingParticipants.visitorId, waitingData.visitorId)
                   ));
-                
+
                 // Send admission to waiting socket
-                io.to(waitingSocketId).emit("admitted", { 
-                  roomId, 
-                  token: result.token, 
-                  serverUrl: result.serverUrl 
+                io.to(waitingSocketId).emit("admitted", {
+                  roomId,
+                  token: result.token,
+                  serverUrl: result.serverUrl
                 });
-                
+
                 log(`Admitted waiting participant ${waitingData.displayName} to room ${roomId}`, "socket.io");
               } catch (error: any) {
                 log(`Error admitting participant: ${error.message}`, "socket.io");
               }
             }
-            
+
             // Cleanup
             waitingParticipantData.delete(waitingSocketId);
           }
@@ -231,7 +234,7 @@ export async function registerRoutes(
         // Host left - keep presence record but mark as gone
         hostPresence.delete(roomId);
         log(`Host left room ${roomId}`, "socket.io");
-        
+
         // Notify room that host left (existing participants can stay)
         io.to(roomId).emit("host-left", { roomId });
       }
@@ -240,19 +243,19 @@ export async function registerRoutes(
     // Join waiting room
     socket.on("join-waiting-room", async (data) => {
       const { roomId, visitorId, displayName } = data;
-      
+
       // Add to waiting room
       if (!waitingRooms.has(roomId)) {
         waitingRooms.set(roomId, new Set());
       }
       waitingRooms.get(roomId)!.add(socket.id);
-      
+
       // Store waiting participant data
       waitingParticipantData.set(socket.id, { roomId, visitorId, displayName });
-      
+
       // Join waiting socket room for notifications
       socket.join(`waiting:${roomId}`);
-      
+
       // Record in database
       try {
         await db.insert(meetingParticipants).values({
@@ -264,52 +267,59 @@ export async function registerRoutes(
       } catch (error: any) {
         log(`Error recording waiting participant: ${error.message}`, "socket.io");
       }
-      
+
       log(`Participant ${displayName} joined waiting room for ${roomId}`, "socket.io");
     });
 
     // Join reaction room for receiving emoji reactions
-    socket.on("join-reaction-room", (data) => {
-      const { roomId } = data;
+    socket.on("join-reaction-room", (data: any) => {
+      const { roomId, participantId } = data;
+      socket.data.roomId = roomId;
+      if (participantId) {
+        socket.data.participantId = participantId;
+        participantToSocket.set(participantId, socket.id);
+        socketToParticipant.set(socket.id, { participantId, socketId: socket.id });
+      }
       socket.join(`reactions:${roomId}`);
-      log(`Socket joined reaction room for ${roomId}`, "socket.io");
+      socket.join(roomId); // Ensure in main room for disconnect broadcast
+      log(`Socket ${socket.id} (participant: ${participantId}) joined reaction/main room for ${roomId}`, "socket.io");
     });
 
     // Handle emoji reaction broadcast
     socket.on("send-reaction", (data) => {
       const { roomId, emoji, participantId, participantName } = data;
-      
+
       // Broadcast to all other participants in the room
       socket.to(`reactions:${roomId}`).emit("reaction", {
         emoji,
         participantId,
         participantName,
       });
-      
+
       log(`Reaction ${emoji} from ${participantName} in room ${roomId}`, "socket.io");
     });
 
     // Handle hand raise broadcast
     socket.on("hand-raise", (data) => {
       const { roomId, participantId, participantName, isRaised } = data;
-      
+
       // Broadcast to all participants in the room
       socket.to(`reactions:${roomId}`).emit("hand-raise-update", {
         participantId,
         participantName,
         isRaised,
       });
-      
+
       log(`Hand ${isRaised ? 'raised' : 'lowered'} by ${participantName} in room ${roomId}`, "socket.io");
     });
 
     // Handle chat message broadcast
     socket.on("send-chat-message", (data: { roomId: string; senderId: string; senderName: string; content: string }) => {
       const { roomId, senderId, senderName, content } = data;
-      
+
       const messageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       const timestamp = Date.now();
-      
+
       // Broadcast to all participants in the room (including sender)
       io.in(`reactions:${roomId}`).emit("chat-message", {
         id: messageId,
@@ -318,13 +328,14 @@ export async function registerRoutes(
         content,
         timestamp,
       });
-      
+
       log(`Chat message from ${senderName} in room ${roomId}`, "socket.io");
     });
 
     socket.on("disconnect", async () => {
       const { participantId, roomId } = socket.data;
-      
+      log(`Socket disconnecting: ${socket.id} (participant: ${participantId}, room: ${roomId})`, "socket.io");
+
       // Clean up waiting room if participant was waiting
       const waitingData = waitingParticipantData.get(socket.id);
       if (waitingData) {
@@ -337,19 +348,30 @@ export async function registerRoutes(
         }
         waitingParticipantData.delete(socket.id);
       }
-      
-      if (participantId && roomId) {
-        // Remove from mappings
-        participantToSocket.delete(participantId);
+
+      // Check if this was a host
+      hostPresence.forEach((presence, rId) => {
+        if (presence.hostIdentity === socket.id) {
+          hostPresence.delete(rId);
+          log(`Host disconnected from room ${rId}`, "socket.io");
+          io.to(rId).emit("host-left", { roomId: rId });
+        }
+      });
+
+      if (participantId) {
+        // Only delete from participantToSocket if this socket is the one currently registered for this participant
+        if (participantToSocket.get(participantId) === socket.id) {
+          participantToSocket.delete(participantId);
+
+          if (roomId) {
+            await storage.removeParticipant(participantId).catch(err => {
+              log(`Error removing participant ${participantId}: ${err.message}`, "socket.io");
+            });
+            socket.to(roomId).emit("participant-left", participantId);
+            log(`Participant ${participantId} left room ${roomId} (final socket disconnect)`, "socket.io");
+          }
+        }
         socketToParticipant.delete(socket.id);
-
-        // Remove from storage
-        await storage.removeParticipant(participantId);
-
-        // Notify others
-        socket.to(roomId).emit("participant-left", participantId);
-
-        log(`Participant ${participantId} disconnected from room ${roomId}`, "socket.io");
       }
     });
   });
@@ -383,15 +405,15 @@ export async function registerRoutes(
       }
 
       if (!isLiveKitConfigured()) {
-        return res.status(500).json({ 
-          message: "LiveKit is not configured. Please set LIVEKIT_API_KEY and LIVEKIT_API_SECRET environment variables." 
+        return res.status(500).json({
+          message: "LiveKit is not configured. Please set LIVEKIT_API_KEY and LIVEKIT_API_SECRET environment variables."
         });
       }
 
       const result = await generateToken(roomName, participantName);
       log(`Generated LiveKit token for ${participantName} in room ${roomName} (isHost: ${result.isHost})`, "livekit");
-      
-      res.json({ 
+
+      res.json({
         token: result.token,
         serverUrl: result.serverUrl,
         isHost: result.isHost,
@@ -406,7 +428,7 @@ export async function registerRoutes(
   // LiveKit config check endpoint
   app.get("/api/livekit/status", (req, res) => {
     const stats = getUsageStats();
-    res.json({ 
+    res.json({
       configured: isLiveKitConfigured(),
       url: process.env.VITE_LIVEKIT_URL ? "configured" : "not configured",
       usage: stats,
@@ -425,7 +447,7 @@ export async function registerRoutes(
 
       // Check if meeting exists and get host info
       const [meeting] = await db.select().from(meetings).where(eq(meetings.roomId, roomId));
-      
+
       // Validate host token if provided
       // A valid host token grants host privileges immediately
       let isValidHostToken = false;
@@ -437,49 +459,49 @@ export async function registerRoutes(
           log(`Invalid host token provided for room ${roomId}`, "api");
         }
       }
-      
+
       // Check if meeting has ended
       const meetingHasEnded = meeting?.endedAt !== null;
       const waitingRoomEnabled = meeting?.waitingRoom === true;
-      
+
       // Check if there's already a host registered for this room
       const existingHost = await db.select().from(meetingParticipants)
         .where(and(
           eq(meetingParticipants.roomId, roomId),
           eq(meetingParticipants.isHost, true)
         ));
-      
+
       const hasExistingHost = existingHost.length > 0;
-      
+
       // Check if this specific visitor was previously marked as host
       const [existingParticipant] = await db.select().from(meetingParticipants)
         .where(and(
           eq(meetingParticipants.roomId, roomId),
           eq(meetingParticipants.visitorId, visitorId)
         ));
-      
+
       const isReturningHost = existingParticipant?.isHost === true;
       const wasAdmitted = existingParticipant?.status === 'admitted';
-      
+
       // Participant is host ONLY if:
       // 1. Has valid host token (the meeting creator)
       // 2. Is returning as previously marked host (same person with hostToken who joined before)
       // NOTE: We removed the fallback that made first joiner host - only creator can be host
       const isHostParticipant = isValidHostToken || isReturningHost;
-      
+
       // Check if host is present in the room
       const hostIsPresent = hostPresence.has(roomId);
-      
+
       // If meeting has ended and participant is NOT host, they must wait
       if (meetingHasEnded && !isHostParticipant) {
         log(`Meeting ${roomId} has ended - participant ${participantName} must wait for host`, "api");
-        
+
         return res.json({
           status: 'waiting',
           message: 'This meeting has ended. Please wait for the host to restart it.',
         });
       }
-      
+
       // If host is rejoining an ended meeting, reset the endedAt field
       if (meetingHasEnded && isHostParticipant) {
         await db.update(meetings)
@@ -492,13 +514,13 @@ export async function registerRoutes(
       // But if waiting room is enabled and meeting was ended, non-hosts wait for manual approval
       if (isHostParticipant || (wasAdmitted && !meetingHasEnded) || (hostIsPresent && !waitingRoomEnabled)) {
         if (!isLiveKitConfigured()) {
-          return res.status(500).json({ 
-            message: "LiveKit is not configured." 
+          return res.status(500).json({
+            message: "LiveKit is not configured."
           });
         }
 
         const result = await generateToken(roomId, participantName);
-        
+
         // Record or update participant
         if (!existingParticipant) {
           await db.insert(meetingParticipants).values({
@@ -515,9 +537,9 @@ export async function registerRoutes(
             .set({ lastSeenAt: new Date(), displayName: participantName, status: 'admitted' })
             .where(eq(meetingParticipants.id, existingParticipant.id));
         }
-        
+
         log(`Participant ${participantName} joined room ${roomId} (isHost: ${isHostParticipant})`, "api");
-        
+
         return res.json({
           status: 'admitted',
           token: result.token,
@@ -527,7 +549,7 @@ export async function registerRoutes(
       } else {
         // Host not present and not previously admitted - must wait
         log(`Participant ${participantName} must wait for host in room ${roomId}`, "api");
-        
+
         return res.json({
           status: 'waiting',
           message: 'Please wait for the host to start the meeting',
@@ -544,7 +566,7 @@ export async function registerRoutes(
     const { roomId } = req.params;
     const isPresent = hostPresence.has(roomId);
     const hostData = hostPresence.get(roomId);
-    
+
     res.json({
       isPresent,
       lastSeen: hostData?.lastSeen || null,
@@ -565,7 +587,7 @@ export async function registerRoutes(
       }
 
       const result = await muteParticipant(roomName, participantIdentity, trackType, muted);
-      
+
       if (result.success) {
         log(`Host ${hostIdentity} ${muted ? 'muted' : 'unmuted'} ${participantIdentity}'s ${trackType} in room ${roomName}`, "livekit");
         res.json({ success: true });
@@ -581,7 +603,7 @@ export async function registerRoutes(
   // Get room host info
   app.get("/api/livekit/host/:roomName", (req, res) => {
     const hostIdentity = getRoomHost(req.params.roomName);
-    res.json({ 
+    res.json({
       hostIdentity: hostIdentity || null,
     });
   });
@@ -605,7 +627,7 @@ export async function registerRoutes(
       const now = new Date();
       const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-      
+
       const todayMeetings = await db.select().from(meetings).where(
         and(
           gte(meetings.scheduledAt, startOfDay),
@@ -622,14 +644,14 @@ export async function registerRoutes(
   app.post("/api/meetings", async (req, res) => {
     try {
       const { title, description, scheduledAt, duration, passcode, waitingRoom } = req.body;
-      
+
       if (!title || !scheduledAt || !duration) {
         return res.status(400).json({ message: "Title, scheduledAt, and duration are required" });
       }
 
       const roomId = crypto.randomUUID().slice(0, 8);
       const hostToken = crypto.randomUUID();
-      
+
       const [meeting] = await db.insert(meetings).values({
         title,
         description: description || null,
@@ -662,23 +684,23 @@ export async function registerRoutes(
   app.patch("/api/meetings/:roomId/end", async (req, res) => {
     try {
       const { roomId } = req.params;
-      
+
       const liveKitResult = await endMeetingForAll(roomId);
       if (!liveKitResult.success) {
         log(`Warning: Could not disconnect participants: ${liveKitResult.error}`, "api");
       }
-      
+
       const [updated] = await db.update(meetings)
         .set({ endedAt: new Date() })
         .where(eq(meetings.roomId, roomId))
         .returning();
-      
+
       if (!updated) {
         return res.status(404).json({ message: "Meeting not found" });
       }
-      
-      res.json({ 
-        success: true, 
+
+      res.json({
+        success: true,
         endedAt: updated.endedAt,
         disconnectedCount: liveKitResult.disconnectedCount || 0
       });
@@ -714,13 +736,13 @@ export async function registerRoutes(
     try {
       const meetingId = parseInt(req.params.meetingId);
       const { content, isPinned } = req.body;
-      
+
       const [note] = await db.insert(meetingNotes).values({
         meetingId,
         content,
         isPinned: isPinned || false,
       }).returning();
-      
+
       res.json(note);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -731,12 +753,12 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const { content, isPinned } = req.body;
-      
+
       const [note] = await db.update(meetingNotes)
         .set({ content, isPinned, updatedAt: new Date() })
         .where(eq(meetingNotes.id, id))
         .returning();
-      
+
       res.json(note);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -779,7 +801,7 @@ export async function registerRoutes(
     try {
       const meetingId = parseInt(req.params.meetingId);
       const { title, description, status, priority, dueAt } = req.body;
-      
+
       const [task] = await db.insert(meetingTasks).values({
         meetingId,
         title,
@@ -788,7 +810,7 @@ export async function registerRoutes(
         priority: priority || "medium",
         dueAt: dueAt ? new Date(dueAt) : null,
       }).returning();
-      
+
       res.json(task);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -799,19 +821,19 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const { title, description, status, priority, dueAt } = req.body;
-      
+
       const [task] = await db.update(meetingTasks)
-        .set({ 
-          title, 
-          description, 
-          status, 
-          priority, 
+        .set({
+          title,
+          description,
+          status,
+          priority,
           dueAt: dueAt ? new Date(dueAt) : null,
-          updatedAt: new Date() 
+          updatedAt: new Date()
         })
         .where(eq(meetingTasks.id, id))
         .returning();
-      
+
       res.json(task);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -854,7 +876,7 @@ export async function registerRoutes(
     try {
       const meetingId = parseInt(req.params.meetingId);
       const { title, content, fileUrl, fileType } = req.body;
-      
+
       const [doc] = await db.insert(meetingDocs).values({
         meetingId,
         title,
@@ -862,7 +884,7 @@ export async function registerRoutes(
         fileUrl,
         fileType,
       }).returning();
-      
+
       res.json(doc);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -873,12 +895,12 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const { title, content } = req.body;
-      
+
       const [doc] = await db.update(meetingDocs)
         .set({ title, content, updatedAt: new Date() })
         .where(eq(meetingDocs.id, id))
         .returning();
-      
+
       res.json(doc);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -908,14 +930,14 @@ export async function registerRoutes(
   app.post("/api/contacts", async (req, res) => {
     try {
       const { name, email, notes, avatarUrl } = req.body;
-      
+
       const [contact] = await db.insert(contacts).values({
         name,
         email,
         notes,
         avatarUrl,
       }).returning();
-      
+
       res.json(contact);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -926,12 +948,12 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const { name, email, notes, avatarUrl } = req.body;
-      
+
       const [contact] = await db.update(contacts)
         .set({ name, email, notes, avatarUrl })
         .where(eq(contacts.id, id))
         .returning();
-      
+
       res.json(contact);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -965,9 +987,9 @@ export async function registerRoutes(
   app.post("/api/smtp-settings", async (req, res) => {
     try {
       const { host, port, secure, username, password, fromEmail, fromName } = req.body;
-      
+
       const existing = await db.select().from(smtpSettings).limit(1);
-      
+
       if (existing.length > 0) {
         const updateData: any = {
           host,
@@ -978,23 +1000,23 @@ export async function registerRoutes(
           fromName,
           updatedAt: new Date(),
         };
-        
+
         if (password && password.trim().length > 0) {
           updateData.password = encryptPassword(password);
         }
-        
+
         const [updated] = await db.update(smtpSettings)
           .set(updateData)
           .where(eq(smtpSettings.id, existing[0].id))
           .returning();
-        
+
         const { password: _, ...safeSettings } = updated;
         res.json({ ...safeSettings, hasPassword: true });
       } else {
         if (!password || password.trim().length === 0) {
           return res.status(400).json({ message: "Password is required for initial setup" });
         }
-        
+
         const [created] = await db.insert(smtpSettings).values({
           host,
           port,
@@ -1004,7 +1026,7 @@ export async function registerRoutes(
           fromEmail,
           fromName,
         }).returning();
-        
+
         const { password: _, ...safeSettings } = created;
         res.json({ ...safeSettings, hasPassword: true });
       }
@@ -1016,9 +1038,9 @@ export async function registerRoutes(
   app.post("/api/smtp-settings/test", async (req, res) => {
     try {
       const { host, port, secure, username, password, fromEmail, fromName } = req.body;
-      
+
       let testPassword = password;
-      
+
       if (!testPassword || testPassword.trim().length === 0) {
         const [existing] = await db.select().from(smtpSettings).limit(1);
         if (existing) {
@@ -1027,7 +1049,7 @@ export async function registerRoutes(
           return res.json({ success: false, error: "Password is required for connection test" });
         }
       }
-      
+
       const result = await testSmtpConnection({
         host,
         port,
@@ -1037,7 +1059,7 @@ export async function registerRoutes(
         fromEmail,
         fromName,
       });
-      
+
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
@@ -1061,23 +1083,23 @@ export async function registerRoutes(
     try {
       const meetingId = parseInt(req.params.meetingId);
       const { recipientEmail, recipientName } = req.body;
-      
+
       const [settings] = await db.select().from(smtpSettings).limit(1);
       if (!settings) {
         return res.status(400).json({ message: "SMTP settings not configured. Please set up email settings first." });
       }
-      
+
       const [meeting] = await db.select().from(meetings).where(eq(meetings.id, meetingId));
       if (!meeting) {
         return res.status(404).json({ message: "Meeting not found" });
       }
-      
+
       const decryptedPassword = decryptPassword(settings.password);
-      const baseUrl = process.env.APP_DOMAIN 
+      const baseUrl = process.env.APP_DOMAIN
         ? `https://${process.env.APP_DOMAIN}`
         : (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5000');
       const meetingLink = `${baseUrl}/room/${meeting.roomId}/join`;
-      
+
       const result = await sendMeetingInvite(
         {
           host: settings.host,
@@ -1096,14 +1118,14 @@ export async function registerRoutes(
         meeting.roomId,
         meetingLink
       );
-      
+
       if (result.success) {
         const [invite] = await db.insert(meetingInvites).values({
           meetingId,
           recipientEmail,
           recipientName,
         }).returning();
-        
+
         res.json({ success: true, invite });
       } else {
         res.status(500).json({ success: false, message: result.error });
@@ -1120,7 +1142,7 @@ export async function registerRoutes(
       const [whiteboard] = await db.select().from(meetingWhiteboards)
         .where(eq(meetingWhiteboards.roomId, roomId))
         .limit(1);
-      
+
       if (whiteboard) {
         res.json(whiteboard);
       } else {
@@ -1135,11 +1157,11 @@ export async function registerRoutes(
     try {
       const { roomId } = req.params;
       const { snapshot } = req.body;
-      
+
       const [existing] = await db.select().from(meetingWhiteboards)
         .where(eq(meetingWhiteboards.roomId, roomId))
         .limit(1);
-      
+
       if (existing) {
         await db.update(meetingWhiteboards)
           .set({ snapshot, updatedAt: new Date() })
@@ -1147,7 +1169,7 @@ export async function registerRoutes(
       } else {
         await db.insert(meetingWhiteboards).values({ roomId, snapshot });
       }
-      
+
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1175,7 +1197,7 @@ export async function registerRoutes(
   app.post("/api/recordings/upload", async (req, res) => {
     try {
       const chunks: Buffer[] = [];
-      
+
       req.on("data", (chunk: Buffer) => {
         chunks.push(chunk);
       });
@@ -1213,7 +1235,7 @@ export async function registerRoutes(
             .values({
               roomId,
               meetingId: meeting?.id || null,
-              hostId: hostId ? parseInt(hostId) : null,
+              hostId: hostId && hostId !== "0" ? parseInt(hostId) : null,
               filename,
               originalFilename,
               fileSize: buffer.length,
@@ -1239,10 +1261,12 @@ export async function registerRoutes(
   });
 
   app.get("/api/recordings", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
     try {
       const recordings = await db.select().from(meetingRecordings)
+        .where(eq(meetingRecordings.hostId, req.user.id))
         .orderBy(desc(meetingRecordings.createdAt));
-      
+
       const recordingsWithMeetingInfo = await Promise.all(
         recordings.map(async (recording) => {
           let meetingTitle = null;
@@ -1253,7 +1277,7 @@ export async function registerRoutes(
           return { ...recording, meetingTitle };
         })
       );
-      
+
       res.json(recordingsWithMeetingInfo);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1261,16 +1285,20 @@ export async function registerRoutes(
   });
 
   app.get("/api/recordings/:id", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
     try {
       const { id } = req.params;
       const [recording] = await db.select().from(meetingRecordings)
-        .where(eq(meetingRecordings.id, parseInt(id)))
+        .where(and(
+          eq(meetingRecordings.id, parseInt(id)),
+          eq(meetingRecordings.hostId, req.user.id)
+        ))
         .limit(1);
-      
+
       if (!recording) {
-        return res.status(404).json({ message: "Recording not found" });
+        return res.status(404).json({ message: "Recording not found or access denied" });
       }
-      
+
       res.json(recording);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1278,18 +1306,22 @@ export async function registerRoutes(
   });
 
   app.get("/api/recordings/:id/stream", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
     try {
       const { id } = req.params;
       const [recording] = await db.select().from(meetingRecordings)
-        .where(eq(meetingRecordings.id, parseInt(id)))
+        .where(and(
+          eq(meetingRecordings.id, parseInt(id)),
+          eq(meetingRecordings.hostId, req.user.id)
+        ))
         .limit(1);
-      
+
       if (!recording) {
-        return res.status(404).json({ message: "Recording not found" });
+        return res.status(404).json({ message: "Recording not found or access denied" });
       }
 
       const filePath = path.join(RECORDINGS_DIR, recording.filename);
-      
+
       if (!fs.existsSync(filePath)) {
         return res.status(404).json({ message: "Recording file not found" });
       }
@@ -1304,7 +1336,7 @@ export async function registerRoutes(
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
         const chunksize = (end - start) + 1;
         const file = fs.createReadStream(filePath, { start, end });
-        
+
         res.writeHead(206, {
           "Content-Range": `bytes ${start}-${end}/${fileSize}`,
           "Accept-Ranges": "bytes",
@@ -1325,18 +1357,22 @@ export async function registerRoutes(
   });
 
   app.get("/api/recordings/:id/download", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
     try {
       const { id } = req.params;
       const [recording] = await db.select().from(meetingRecordings)
-        .where(eq(meetingRecordings.id, parseInt(id)))
+        .where(and(
+          eq(meetingRecordings.id, parseInt(id)),
+          eq(meetingRecordings.hostId, req.user.id)
+        ))
         .limit(1);
-      
+
       if (!recording) {
-        return res.status(404).json({ message: "Recording not found" });
+        return res.status(404).json({ message: "Recording not found or access denied" });
       }
 
       const filePath = path.join(RECORDINGS_DIR, recording.filename);
-      
+
       if (!fs.existsSync(filePath)) {
         return res.status(404).json({ message: "Recording file not found" });
       }
@@ -1344,7 +1380,7 @@ export async function registerRoutes(
       const downloadName = recording.originalFilename || recording.filename;
       res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
       res.setHeader("Content-Type", recording.mimeType || "video/webm");
-      
+
       fs.createReadStream(filePath).pipe(res);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1352,24 +1388,28 @@ export async function registerRoutes(
   });
 
   app.delete("/api/recordings/:id", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
     try {
       const { id } = req.params;
       const [recording] = await db.select().from(meetingRecordings)
-        .where(eq(meetingRecordings.id, parseInt(id)))
+        .where(and(
+          eq(meetingRecordings.id, parseInt(id)),
+          eq(meetingRecordings.hostId, req.user.id)
+        ))
         .limit(1);
-      
+
       if (!recording) {
-        return res.status(404).json({ message: "Recording not found" });
+        return res.status(404).json({ message: "Recording not found or access denied" });
       }
 
       const filePath = path.join(RECORDINGS_DIR, recording.filename);
-      
+
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
 
       await db.delete(meetingRecordings).where(eq(meetingRecordings.id, parseInt(id)));
-      
+
       log(`Recording deleted: ${recording.filename}`, "recordings");
       res.json({ success: true });
     } catch (error: any) {

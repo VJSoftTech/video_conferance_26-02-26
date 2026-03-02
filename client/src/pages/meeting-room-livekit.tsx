@@ -12,6 +12,7 @@ import "@livekit/components-styles";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import { useToast } from "@/hooks/use-toast";
 import { useRecording } from "@/hooks/use-recording";
+import { useAuth } from "@/hooks/use-auth";
 import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users, ChevronUp, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -56,6 +57,7 @@ function MeetingContent({
   // ✅ IMPROVED: Track toggle state to prevent multiple simultaneous requests
   const [isTogglingAudio, setIsTogglingAudio] = useState(false);
   const [isTogglingVideo, setIsTogglingVideo] = useState(false);
+  const [trackUpdateCount, setTrackUpdateCount] = useState(0);
   const toggleTimeoutRef = useRef<{ audio?: NodeJS.Timeout; video?: NodeJS.Timeout }>({});
 
   const FIRST_PAGE_COUNT = 2;
@@ -101,9 +103,8 @@ function MeetingContent({
       const track = pub?.track?.mediaStreamTrack;
       if (track && track.readyState === "live") tracks.push(track);
     });
-    console.log("[Meeting] getRemoteAudioTracks called, found:", tracks.length);
     return tracks;
-  }, [room]);
+  }, [room, trackUpdateCount]);
 
   const getCompositeVideoTracks = useCallback((): MediaStreamTrack[] => {
     const tracks: MediaStreamTrack[] = [];
@@ -123,9 +124,10 @@ function MeetingContent({
       const track = pub?.track?.mediaStreamTrack;
       if (track && track.readyState === "live") tracks.push(track);
     });
-    console.log("[Meeting] getCompositeVideoTracks called, found:", tracks.length);
     return tracks;
-  }, [room]);
+  }, [room, trackUpdateCount]);
+
+  const { user } = useAuth();
 
   const {
     state: recordingState,
@@ -134,9 +136,10 @@ function MeetingContent({
     pauseRecording,
     resumeRecording,
     stopRecording,
-    onTracksChanged,
+    // onTracksChanged removed as it is not part of useRecording hook
   } = useRecording({
     roomId,
+    hostId: user?.id,
     getRemoteAudioTracks,
     getCompositeVideoTracks,
     onRecordingComplete: () => {
@@ -208,10 +211,10 @@ function MeetingContent({
 
   const tracks = useTracks(
     [
-      { source: Track.Source.Camera, withPlaceholder: true },
+      { source: Track.Source.Camera, withPlaceholder: false },
       { source: Track.Source.ScreenShare, withPlaceholder: false },
     ],
-    { onlySubscribed: false }
+    { onlySubscribed: true } // Revert to onlySubscribed: true for stability
   );
 
   const screenShareTrack = useMemo(
@@ -219,39 +222,7 @@ function MeetingContent({
     [tracks]
   );
 
-  useEffect(() => {
-    const initMedia = async () => {
-      if (initialVideoEnabled) {
-        try {
-          await localParticipant.setCameraEnabled(true);
-          setIsVideoEnabled(true);
-        } catch (err: any) {
-          setIsVideoEnabled(false);
-          if (err.name === "NotAllowedError") {
-            toast({ title: "Camera Access Denied", description: "Please allow camera access in your browser settings.", variant: "destructive" });
-          }
-        }
-      } else {
-        await localParticipant.setCameraEnabled(false);
-        setIsVideoEnabled(false);
-      }
-      if (initialAudioEnabled) {
-        try {
-          await localParticipant.setMicrophoneEnabled(true);
-          setIsAudioEnabled(true);
-        } catch (err: any) {
-          setIsAudioEnabled(false);
-          if (err.name === "NotAllowedError") {
-            toast({ title: "Microphone Access Denied", description: "Please allow microphone access in your browser settings.", variant: "destructive" });
-          }
-        }
-      } else {
-        await localParticipant.setMicrophoneEnabled(false);
-        setIsAudioEnabled(false);
-      }
-    };
-    initMedia();
-  }, [localParticipant, toast, initialAudioEnabled, initialVideoEnabled]);
+  // Media activation moved to LiveKitRoom props for faster performance
 
   // ✅ Socket initialization with error handling (NO RECONNECTION ALERTS)
   useEffect(() => {
@@ -261,8 +232,8 @@ function MeetingContent({
       }
 
       try {
-        const socket = io({ 
-          path: "/socket.io", 
+        const socket = io({
+          path: "/socket.io",
           transports: ["websocket", "polling"],
           reconnection: true,
           reconnectionDelay: 1000,
@@ -271,9 +242,15 @@ function MeetingContent({
         });
 
         socket.on("connect", () => {
-          console.log("[Socket] Connected successfully");
-          if (isHost) socket.emit("host-presence", { roomId, isPresent: true });
-          socket.emit("join-reaction-room", { roomId });
+          console.log("[Socket] Connected successfully, socketId:", socket.id);
+          if (isHost) {
+            socket.emit("host-presence", { roomId, isPresent: true });
+          }
+          // Join the reaction room and associate with local participant
+          socket.emit("join-reaction-room", {
+            roomId,
+            participantId: localParticipant.identity
+          });
         });
 
         socket.on("connect_error", (error) => {
@@ -289,6 +266,18 @@ function MeetingContent({
         socket.on("error", (error) => {
           console.error("[Socket] Socket error:", error);
           // NO TOAST - Silent reconnection
+        });
+
+        socket.on("participant-left", (pId: string) => {
+          console.log("[Socket] Participant left signal received:", pId);
+          setRaisedHands((prev) => {
+            if (prev.has(pId)) {
+              const newMap = new Map(prev);
+              newMap.delete(pId);
+              return newMap;
+            }
+            return prev;
+          });
         });
 
         socket.on("reaction", (data: { emoji: string; participantName: string; participantId: string }) => {
@@ -338,7 +327,7 @@ function MeetingContent({
       reactionTimersRef.current.forEach((t) => clearTimeout(t));
       reactionTimersRef.current.clear();
     };
-  }, [isHost, roomId, toast]);
+  }, [localParticipant.identity, isHost, roomId, toast]);
 
   useEffect(() => {
     const participantIds = new Set(participants.map((p) => p.identity));
@@ -360,27 +349,20 @@ function MeetingContent({
       // NO ALERTS - Just log the state change
     };
 
-    const handleScreenShareChange = () => setIsScreenSharing(localParticipant.isScreenShareEnabled);
-    const handleTracksChanged = () => { onTracksChanged(); };
+    const handleScreenShareChange = () => {
+      setIsScreenSharing(localParticipant.isScreenShareEnabled);
+    };
 
     room.on(RoomEvent.ConnectionStateChanged, handleConnectionStateChange);
     room.on(RoomEvent.LocalTrackPublished, handleScreenShareChange);
     room.on(RoomEvent.LocalTrackUnpublished, handleScreenShareChange);
-    room.on(RoomEvent.TrackPublished, handleTracksChanged);
-    room.on(RoomEvent.TrackUnpublished, handleTracksChanged);
-    room.on(RoomEvent.LocalTrackPublished, handleTracksChanged);
-    room.on(RoomEvent.LocalTrackUnpublished, handleTracksChanged);
 
     return () => {
       room.off(RoomEvent.ConnectionStateChanged, handleConnectionStateChange);
       room.off(RoomEvent.LocalTrackPublished, handleScreenShareChange);
       room.off(RoomEvent.LocalTrackUnpublished, handleScreenShareChange);
-      room.off(RoomEvent.TrackPublished, handleTracksChanged);
-      room.off(RoomEvent.TrackUnpublished, handleTracksChanged);
-      room.off(RoomEvent.LocalTrackPublished, handleTracksChanged);
-      room.off(RoomEvent.LocalTrackUnpublished, handleTracksChanged);
     };
-  }, [room, localParticipant, toast, onTracksChanged]);
+  }, [room, localParticipant, toast]);
 
   // ✅ IMPROVED: Better audio toggle with timeout
   const handleToggleAudio = useCallback(async () => {
@@ -390,7 +372,7 @@ function MeetingContent({
     }
 
     setIsTogglingAudio(true);
-    
+
     if (toggleTimeoutRef.current.audio) {
       clearTimeout(toggleTimeoutRef.current.audio);
     }
@@ -398,10 +380,10 @@ function MeetingContent({
     const timeoutId = setTimeout(() => {
       console.error("[Meeting] Audio toggle timeout");
       setIsTogglingAudio(false);
-      toast({ 
-        title: "Timeout", 
-        description: "Microphone toggle took too long. Please try again.", 
-        variant: "destructive" 
+      toast({
+        title: "Timeout",
+        description: "Microphone toggle took too long. Please try again.",
+        variant: "destructive"
       });
     }, TRACK_TOGGLE_CONFIG.TIMEOUT);
     toggleTimeoutRef.current.audio = timeoutId;
@@ -409,19 +391,19 @@ function MeetingContent({
     try {
       const newState = !isAudioEnabled;
       console.log(`[Meeting] Attempting to ${newState ? "enable" : "disable"} microphone`);
-      
+
       const togglePromise = localParticipant.setMicrophoneEnabled(newState);
       await Promise.race([
         togglePromise,
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error("Microphone toggle timeout")), TRACK_TOGGLE_CONFIG.TIMEOUT - 500)
         )
       ]);
-      
+
       console.log(`[Meeting] Microphone ${newState ? "enabled" : "disabled"} successfully`);
       setIsAudioEnabled(newState);
       sessionStorage.setItem("audioEnabled", String(newState));
-      
+
       toast({
         title: newState ? "Microphone On" : "Microphone Off",
         description: newState ? "Your microphone is now on" : "Your microphone is now off",
@@ -430,24 +412,24 @@ function MeetingContent({
     } catch (error: any) {
       console.error("[Meeting] Audio toggle error:", error);
       setIsAudioEnabled(!isAudioEnabled);
-      
+
       if (error.message?.includes("timeout")) {
-        toast({ 
-          title: "Microphone Timeout", 
-          description: "Taking too long to toggle microphone. Check your connection and try again.", 
-          variant: "destructive" 
+        toast({
+          title: "Microphone Timeout",
+          description: "Taking too long to toggle microphone. Check your connection and try again.",
+          variant: "destructive"
         });
       } else if (error.name === "NotAllowedError") {
-        toast({ 
-          title: "Permission Denied", 
-          description: "Microphone access denied. Check your browser permissions.", 
-          variant: "destructive" 
+        toast({
+          title: "Permission Denied",
+          description: "Microphone access denied. Check your browser permissions.",
+          variant: "destructive"
         });
       } else {
-        toast({ 
-          title: "Error", 
-          description: `Failed to toggle microphone: ${error.message || "Unknown error"}`, 
-          variant: "destructive" 
+        toast({
+          title: "Error",
+          description: `Failed to toggle microphone: ${error.message || "Unknown error"}`,
+          variant: "destructive"
         });
       }
     } finally {
@@ -475,10 +457,10 @@ function MeetingContent({
     const timeoutId = setTimeout(() => {
       console.error("[Meeting] Video toggle timeout");
       setIsTogglingVideo(false);
-      toast({ 
-        title: "Timeout", 
-        description: "Camera toggle took too long. Please try again.", 
-        variant: "destructive" 
+      toast({
+        title: "Timeout",
+        description: "Camera toggle took too long. Please try again.",
+        variant: "destructive"
       });
     }, TRACK_TOGGLE_CONFIG.TIMEOUT);
     toggleTimeoutRef.current.video = timeoutId;
@@ -486,19 +468,19 @@ function MeetingContent({
     try {
       const newState = !isVideoEnabled;
       console.log(`[Meeting] Attempting to ${newState ? "enable" : "disable"} camera`);
-      
+
       const togglePromise = localParticipant.setCameraEnabled(newState);
       await Promise.race([
         togglePromise,
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error("Camera toggle timeout")), TRACK_TOGGLE_CONFIG.TIMEOUT - 500)
         )
       ]);
-      
+
       console.log(`[Meeting] Camera ${newState ? "enabled" : "disabled"} successfully`);
       setIsVideoEnabled(newState);
       sessionStorage.setItem("videoEnabled", String(newState));
-      
+
       toast({
         title: newState ? "Camera On" : "Camera Off",
         description: newState ? "Your camera is now on" : "Your camera is now off",
@@ -507,24 +489,24 @@ function MeetingContent({
     } catch (error: any) {
       console.error("[Meeting] Video toggle error:", error);
       setIsVideoEnabled(!isVideoEnabled);
-      
+
       if (error.message?.includes("timeout")) {
-        toast({ 
-          title: "Camera Timeout", 
-          description: "Taking too long to toggle camera. Check your connection and try again.", 
-          variant: "destructive" 
+        toast({
+          title: "Camera Timeout",
+          description: "Taking too long to toggle camera. Check your connection and try again.",
+          variant: "destructive"
         });
       } else if (error.name === "NotAllowedError") {
-        toast({ 
-          title: "Permission Denied", 
-          description: "Camera access denied. Check your browser permissions.", 
-          variant: "destructive" 
+        toast({
+          title: "Permission Denied",
+          description: "Camera access denied. Check your browser permissions.",
+          variant: "destructive"
         });
       } else {
-        toast({ 
-          title: "Error", 
-          description: `Failed to toggle camera: ${error.message || "Unknown error"}`, 
-          variant: "destructive" 
+        toast({
+          title: "Error",
+          description: `Failed to toggle camera: ${error.message || "Unknown error"}`,
+          variant: "destructive"
         });
       }
     } finally {
@@ -859,8 +841,8 @@ export default function MeetingRoomLiveKit() {
         setIsWaiting(true);
         setIsConnecting(false);
         if (!socketRef.current) {
-          const socket = io({ 
-            path: "/socket.io", 
+          const socket = io({
+            path: "/socket.io",
             transports: ["websocket", "polling"],
             reconnection: true,
             reconnectionDelay: 1000,
@@ -895,10 +877,10 @@ export default function MeetingRoomLiveKit() {
       setIsConnecting(false);
       setError("");
     } catch (err: any) {
-      if (retryCountRef.current < 3) { 
-        retryCountRef.current++; 
-        setTimeout(() => fetchToken(name), 2000); 
-        return; 
+      if (retryCountRef.current < 3) {
+        retryCountRef.current++;
+        setTimeout(() => fetchToken(name), 2000);
+        return;
       }
       setError(err.message);
       setIsConnecting(false);
@@ -908,16 +890,26 @@ export default function MeetingRoomLiveKit() {
 
   useEffect(() => {
     if (!hasCheckedStorage) return;
-    
+
     if (!participantName) {
       setLocation(`/room/${params.roomId}/join`);
       return;
     }
 
+    // ✅ FIX: Prevent "Connection Lost" toast on refresh
+    const handleBeforeUnload = () => {
+      setIntentionalLeave(true);
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
     retryCountRef.current = 0;
     fetchToken(participantName);
-    
-    return () => { socketRef.current?.disconnect(); socketRef.current = null; };
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+    };
   }, [params.roomId, participantName, setLocation, fetchToken, hasCheckedStorage]);
 
   const handleLeave = useCallback(() => {
@@ -930,8 +922,8 @@ export default function MeetingRoomLiveKit() {
 
   const handleDisconnect = useCallback(() => {
     if (!intentionalLeave) {
-      toast({ 
-        title: "Connection Lost", 
+      toast({
+        title: "Connection Lost",
         description: "You've been disconnected. Refresh the page to reconnect.",
         variant: "destructive"
       });
@@ -998,8 +990,37 @@ export default function MeetingRoomLiveKit() {
     </div>
   );
 
+  const initialAudioEnabled = sessionStorage.getItem("audioEnabled") !== "false";
+  const initialVideoEnabled = sessionStorage.getItem("videoEnabled") !== "false";
+
   return (
-    <LiveKitRoom token={token} serverUrl={serverUrl} connect={true} onDisconnected={handleDisconnect} onError={handleError} video={false} audio={false} data-testid="meeting-room-livekit">
+    <LiveKitRoom
+      token={token}
+      serverUrl={serverUrl}
+      connect={true}
+      onDisconnected={handleDisconnect}
+      onError={handleError}
+      video={initialVideoEnabled}
+      audio={initialAudioEnabled}
+      options={{
+        adaptiveStream: true,
+        dynacast: true,
+        publishDefaults: {
+          videoSimulcast: true,
+          screenShareSimulcast: true,
+          stopMicTrackOnMute: true,
+          // Removed fixed VP8 to allow auto-negotiation for stability
+        },
+        videoCaptureDefaults: {
+          resolution: {
+            width: 640,
+            height: 360,
+            frameRate: 30,
+          }
+        }
+      }}
+      data-testid="meeting-room-livekit"
+    >
       <MeetingContent roomId={params.roomId!} serverUrl={serverUrl} onLeave={handleLeave} isHost={isHost} />
     </LiveKitRoom>
   );

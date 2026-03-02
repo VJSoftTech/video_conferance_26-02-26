@@ -162,7 +162,7 @@ export function useRecording({
           headers: {
             "Content-Type": "application/octet-stream",
             "x-room-id": roomId,
-            "x-host-id": hostId?.toString() || "",
+            "x-host-id": hostId ? hostId.toString() : "0",
             "x-duration": finalDuration.toString(),
             "x-original-filename": filename,
             "x-mime-type": blob.type || "",
@@ -294,23 +294,23 @@ export function useRecording({
     videoElementsRef.current = videoEls;
 
     const canvas = document.createElement("canvas");
-    
+
     // ✅ FIXED: Optimize canvas size based on participant count
     // For 2 participants: use 1280x720 (landscape 16:9)
     // The grid will be 1x2 or 2x1, so we need height that fills completely
-    
+
     const isPortrait =
       typeof window !== "undefined" && window.innerHeight > window.innerWidth;
-    
+
     let baseWidth = 1280;
     let baseHeight = 720;
-    
+
     // For 2 participants side-by-side, use full width/height without aspect ratio constraints
     if (liveVideoTracks.length === 2) {
       baseWidth = 1280;
       baseHeight = 720;
     }
-    
+
     canvas.width = isPortrait ? baseHeight : baseWidth;
     canvas.height = isPortrait ? baseWidth : baseHeight;
     canvasRef.current = canvas;
