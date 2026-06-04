@@ -1,7 +1,6 @@
 import {
+	Box,
 	StateNode,
-	TLFrameShape,
-	TLGroupShape,
 	TLPointerEventInfo,
 	TLShapeId,
 	isAccelKey,
@@ -28,7 +27,7 @@ export class Erasing extends StateNode {
 		this.markId = this.editor.markHistoryStoppingPoint('erase scribble begin')
 		this.info = info
 
-		const { originPagePoint } = this.editor.inputs
+		const originPagePoint = this.editor.inputs.getOriginPagePoint()
 		this.excludedShapeIds = new Set(
 			this.editor
 				.getCurrentPageShapes()
@@ -37,8 +36,8 @@ export class Erasing extends StateNode {
 					if (this.editor.isShapeOrAncestorLocked(shape)) return true
 					//If the shape is a group or frame, check we're inside it when we start erasing
 					if (
-						this.editor.isShapeOfType<TLGroupShape>(shape, 'group') ||
-						this.editor.isShapeOfType<TLFrameShape>(shape, 'frame')
+						this.editor.isShapeOfType(shape, 'group') ||
+						this.editor.isShapeOfType(shape, 'frame')
 					) {
 						const pointInShapeShape = this.editor.getPointInShapeSpace(shape, originPagePoint)
 						const geometry = this.editor.getShapeGeometry(shape)
@@ -60,7 +59,7 @@ export class Erasing extends StateNode {
 	}
 
 	private pushPointToScribble() {
-		const { x, y } = this.editor.inputs.currentPagePoint
+		const { x, y } = this.editor.inputs.getCurrentPagePoint()
 		this.editor.scribbles.addPoint(this.scribbleId, x, y)
 	}
 
@@ -99,10 +98,8 @@ export class Erasing extends StateNode {
 		const { editor, excludedShapeIds } = this
 		const erasingShapeIds = editor.getErasingShapeIds()
 		const zoomLevel = editor.getZoomLevel()
-		const currentPageShapes = editor.getCurrentPageRenderingShapesSorted()
-		const {
-			inputs: { currentPagePoint, previousPagePoint },
-		} = editor
+		const currentPagePoint = editor.inputs.getCurrentPagePoint()
+		const previousPagePoint = editor.inputs.getPreviousPagePoint()
 
 		this.pushPointToScribble()
 
@@ -110,8 +107,21 @@ export class Erasing extends StateNode {
 		const erasing = new Set<TLShapeId>(erasingShapeIds)
 		const minDist = this.editor.options.hitTestMargin / zoomLevel
 
+		// Create bounds around line segment with margin
+		const lineBounds = Box.FromPoints([previousPagePoint, currentPagePoint]).expandBy(minDist)
+		const candidateIds = editor.getShapeIdsInsideBounds(lineBounds)
+
+		// Early return if no candidates - avoid expensive getCurrentPageRenderingShapesSorted()
+		if (candidateIds.size === 0) {
+			editor.setErasingShapes(Array.from(erasing))
+			return
+		}
+
+		const allShapes = editor.getCurrentPageRenderingShapesSorted()
+		const currentPageShapes = allShapes.filter((shape) => candidateIds.has(shape.id))
+
 		for (const shape of currentPageShapes) {
-			if (editor.isShapeOfType<TLGroupShape>(shape, 'group')) continue
+			if (editor.isShapeOfType(shape, 'group')) continue
 
 			// Avoid testing masked shapes, unless the pointer is inside the mask
 			const pageMask = editor.getShapeMask(shape.id)

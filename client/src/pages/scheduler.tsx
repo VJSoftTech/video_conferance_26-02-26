@@ -14,6 +14,7 @@ interface Meeting {
   scheduledAt: string;
   duration: number;
   roomId: string;
+  hostToken?: string;
   description?: string;
 }
 
@@ -76,8 +77,9 @@ export default function SchedulerPage() {
     createMutation.mutate({ title, scheduledAt, duration: parseInt(duration) });
   };
 
-  const handleJoinMeeting = (roomId: string) => {
-    navigate(`/room/${roomId}/join`);
+  const handleJoinMeeting = (meeting: Meeting) => {
+    const hostQuery = meeting.hostToken ? `?host=${meeting.hostToken}` : "";
+    navigate(`/room/${meeting.roomId}/join${hostQuery}`);
   };
 
   return (
@@ -199,7 +201,7 @@ export default function SchedulerPage() {
                         </p>
                       </div>
                       <div className="flex gap-2">
-                        <Button variant="outline" size="sm" onClick={() => handleJoinMeeting(meeting.roomId)}>
+                        <Button variant="outline" size="sm" onClick={() => handleJoinMeeting(meeting)}>
                           Join
                         </Button>
                         <Button 

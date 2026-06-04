@@ -166,6 +166,7 @@ export function NewMeetingDialog({ open, onOpenChange }: NewMeetingDialogProps) 
               onChange={(e) => setDuration(Number(e.target.value))}
               className="h-7 px-2 text-xs bg-[#0d1117] border border-white/10 rounded text-white focus:outline-none focus:ring-1 focus:ring-primary/50"
             >
+              <option value={5}>5 min</option>
               <option value={15}>15 min</option>
               <option value={30}>30 min</option>
               <option value={45}>45 min</option>

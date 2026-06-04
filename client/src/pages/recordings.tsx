@@ -1,16 +1,8 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -27,10 +19,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
-import { Play, Download, Trash2, Video, Clock, HardDrive, Calendar, Loader2 } from "lucide-react";
+import { Play, Download, Trash2, Video, Loader2 } from "lucide-react";
 
 interface Recording {
   id: number;
@@ -59,19 +50,49 @@ function formatFileSize(bytes: number | null): string {
   return `${size.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function formatDuration(seconds: number | null): string {
-  if (!seconds) return "Unknown";
+function formatDurationYT(seconds: number | null): string {
+  if (seconds === null || seconds === undefined) return "0:00";
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  
+  const secs = Math.floor(seconds % 60);
   if (hrs > 0) {
-    return `${hrs}h ${mins}m ${secs}s`;
+    return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   }
-  if (mins > 0) {
-    return `${mins}m ${secs}s`;
-  }
-  return `${secs}s`;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function VideoThumbnail({ src }: { src: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const handleLoadedMetadata = () => {
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0.5;
+    }
+  };
+
+  const handleSeeked = () => {
+    setLoaded(true);
+  };
+
+  return (
+    <div className="relative w-full h-full bg-black">
+      {!loaded && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <Video className="w-8 h-8 text-gray-500" />
+        </div>
+      )}
+      <video
+        ref={videoRef}
+        src={src}
+        preload="metadata"
+        onLoadedMetadata={handleLoadedMetadata}
+        onSeeked={handleSeeked}
+        className={`w-full h-full object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
+        muted
+      />
+    </div>
+  );
 }
 
 export default function RecordingsPage() {
@@ -119,119 +140,112 @@ export default function RecordingsPage() {
   return (
     <DashboardShell>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">Recordings</h1>
-            <p className="text-muted-foreground mt-1">
-              View and manage your meeting recordings
-            </p>
-          </div>
+        <div>
+          <h1 className="text-3xl font-bold">Recordings</h1>
+          <p className="text-muted-foreground mt-1">
+            All meeting recordings you have made
+          </p>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Video className="w-5 h-5" />
-              All Recordings
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+        {isLoading ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+          </div>
+        ) : recordings.length === 0 ? (
+          <div className="text-center py-20 text-muted-foreground">
+            <Video className="w-12 h-12 mx-auto mb-4 opacity-50" />
+            <p className="text-lg font-medium">No recordings yet</p>
+            <p className="text-sm mt-1">
+              Start a meeting and click the record button to create your first recording
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Showing 1–{recordings.length} of {recordings.length} recording{recordings.length !== 1 ? "s" : ""}
+            </p>
+
+            {recordings.map((recording) => (
+              <div
+                key={recording.id}
+                className="flex gap-4 bg-white dark:bg-card rounded-2xl border shadow-sm overflow-hidden"
+              >
+                {/* Thumbnail */}
+                <div className="relative flex-shrink-0 w-[380px] h-[240px] bg-black rounded-l-2xl overflow-hidden">
+                  <VideoThumbnail
+                    src={`/api/recordings/${recording.id}/stream`}
+                  />
+                  <span className="absolute bottom-2 right-2 bg-black/80 text-white text-xs font-mono px-1.5 py-0.5 rounded">
+                    {formatDurationYT(recording.duration)}
+                  </span>
+                </div>
+
+                {/* Info */}
+                <div className="flex-1 min-w-0 py-4 pr-2">
+                  <h3 className="font-bold text-base leading-tight">
+                    {recording.meetingTitle || "Instant Meeting - Recording"}
+                  </h3>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    {recording.roomId}
+                  </p>
+                  <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+                    <div className="flex items-center gap-1.5">
+                      <span>Meeting ID:</span>
+                      <Badge variant="secondary" className="text-xs font-mono px-2 py-0">
+                        {recording.meetingId ?? recording.roomId}
+                      </Badge>
+                    </div>
+                    <div>
+                      Date:{" "}
+                      <span className="text-blue-500">
+                        {format(new Date(recording.createdAt), "M/d/yyyy, h:mm:ss aa")}
+                      </span>
+                    </div>
+                    <div>
+                      Duration:{" "}
+                      <span className="font-medium text-foreground">
+                        {formatDurationYT(recording.duration)}
+                      </span>
+                      <span className="mx-1.5">·</span>
+                      Size:{" "}
+                      <span className="font-medium text-foreground">
+                        {formatFileSize(recording.fileSize)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex flex-col justify-center gap-2 pr-5 py-4 flex-shrink-0">
+                  <Button
+                    size="sm"
+                    className="w-32 bg-purple-100 hover:bg-purple-200 text-purple-700 border-0 shadow-none font-medium"
+                    onClick={() => setPlayingRecording(recording)}
+                  >
+                    <Play className="w-4 h-4 mr-1.5" />
+                    View
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="w-32 bg-green-100 hover:bg-green-200 text-green-700 border-0 shadow-none font-medium"
+                    onClick={() => handleDownload(recording)}
+                  >
+                    <Download className="w-4 h-4 mr-1.5" />
+                    Download
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="w-32 bg-red-100 hover:bg-red-200 text-red-600 border-0 shadow-none font-medium"
+                    onClick={() => setDeleteConfirm(recording)}
+                  >
+                    <Trash2 className="w-4 h-4 mr-1.5" />
+                    Delete
+                  </Button>
+                </div>
               </div>
-            ) : recordings.length === 0 ? (
-              <div className="text-center py-12 text-muted-foreground">
-                <Video className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                <p className="text-lg font-medium">No recordings yet</p>
-                <p className="text-sm mt-1">
-                  Start a meeting and click the record button to create your first recording
-                </p>
-              </div>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Meeting</TableHead>
-                    <TableHead>Room ID</TableHead>
-                    <TableHead>
-                      <div className="flex items-center gap-1">
-                        <Clock className="w-4 h-4" />
-                        Duration
-                      </div>
-                    </TableHead>
-                    <TableHead>
-                      <div className="flex items-center gap-1">
-                        <HardDrive className="w-4 h-4" />
-                        Size
-                      </div>
-                    </TableHead>
-                    <TableHead>
-                      <div className="flex items-center gap-1">
-                        <Calendar className="w-4 h-4" />
-                        Created
-                      </div>
-                    </TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {recordings.map((recording) => (
-                    <TableRow key={recording.id}>
-                      <TableCell className="font-medium">
-                        {recording.meetingTitle || "Untitled Meeting"}
-                      </TableCell>
-                      <TableCell>
-                        <code className="text-xs bg-muted px-2 py-1 rounded">
-                          {recording.roomId}
-                        </code>
-                      </TableCell>
-                      <TableCell>{formatDuration(recording.duration)}</TableCell>
-                      <TableCell>{formatFileSize(recording.fileSize)}</TableCell>
-                      <TableCell>
-                        {format(new Date(recording.createdAt), "MMM d, yyyy HH:mm")}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={recording.status === "completed" ? "default" : "secondary"}
-                        >
-                          {recording.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setPlayingRecording(recording)}
-                          >
-                            <Play className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleDownload(recording)}
-                          >
-                            <Download className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="text-destructive hover:text-destructive"
-                            onClick={() => setDeleteConfirm(recording)}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+            ))}
+          </div>
+        )}
       </div>
 
       <Dialog open={!!playingRecording} onOpenChange={() => setPlayingRecording(null)}>
@@ -259,7 +273,7 @@ export default function RecordingsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Recording?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete the recording "{deleteConfirm?.meetingTitle || deleteConfirm?.roomId}". 
+              This will permanently delete the recording "{deleteConfirm?.meetingTitle || deleteConfirm?.roomId}".
               This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>

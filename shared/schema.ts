@@ -251,6 +251,12 @@ export interface ServerToClientEvents {
   "reaction": (data: { emoji: string; participantId: string; participantName: string }) => void;
   "hand-raise-update": (data: { participantId: string; participantName: string; isRaised: boolean }) => void;
   "chat-message": (data: { id: string; senderId: string; senderName: string; content: string; timestamp: number }) => void;
+  "waiting-participant-joined": (data: { roomId: string; socketId: string; displayName: string; joinedAt: number }) => void;
+  "waiting-participants-list": (data: { roomId: string; participants: Array<{ socketId: string; displayName: string; joinedAt: number }> }) => void;
+  "declined": (data: { roomId: string }) => void;
+  "waiting-participant-left": (data: { roomId: string; socketId: string }) => void;
+  "meeting-warning": (data: { roomId: string; minutesRemaining: number }) => void;
+  "meeting-ended": (data: { roomId: string; reason: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -266,4 +272,6 @@ export interface ClientToServerEvents {
   "send-reaction": (data: { roomId: string; emoji: string; participantId: string; participantName: string }) => void;
   "hand-raise": (data: { roomId: string; participantId: string; participantName: string; isRaised: boolean }) => void;
   "send-chat-message": (data: { roomId: string; senderId: string; senderName: string; content: string }) => void;
+  "admit-participant": (data: { roomId: string; socketId: string }) => void;
+  "decline-participant": (data: { roomId: string; socketId: string }) => void;
 }

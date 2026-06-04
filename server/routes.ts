@@ -35,6 +35,9 @@ const waitingRooms = new Map<string, Set<string>>();
 // Waiting participant data - socketId -> { roomId, visitorId, displayName }
 const waitingParticipantData = new Map<string, { roomId: string; visitorId: string; displayName: string }>();
 
+// Meeting duration timers - roomId -> array of active NodeJS.Timeout handles
+const roomDurationTimers = new Map<string, NodeJS.Timeout[]>();
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -181,58 +184,112 @@ export async function registerRoutes(
     // Host presence management
     socket.on("host-presence", async (data) => {
       const { roomId, isPresent } = data;
-      
+
       if (isPresent) {
-        // Host joined - mark presence and admit all waiting participants
         hostPresence.set(roomId, { hostIdentity: socket.id, lastSeen: new Date() });
         log(`Host joined room ${roomId}`, "socket.io");
-        
-        // Notify room that host joined
+
+        // Notify waiting participants that host joined
         io.to(`waiting:${roomId}`).emit("host-joined", { roomId });
-        
-        // Admit all waiting participants
-        const waitingSet = waitingRooms.get(roomId);
-        if (waitingSet) {
-          const waitingSocketIds = Array.from(waitingSet);
-          for (const waitingSocketId of waitingSocketIds) {
-            const waitingData = waitingParticipantData.get(waitingSocketId);
-            if (waitingData) {
+
+        // Check meeting settings for waiting room and duration
+        let waitingRoomEnabled = false;
+        try {
+          const [meeting] = await db.select().from(meetings).where(eq(meetings.roomId, roomId));
+          waitingRoomEnabled = meeting?.waitingRoom === true;
+
+          // Set up duration enforcement timers (only once per active meeting)
+          if (meeting && !roomDurationTimers.has(roomId)) {
+            const endTime = new Date(meeting.scheduledAt).getTime() + meeting.duration * 60 * 1000;
+            const msRemaining = endTime - Date.now();
+
+            if (msRemaining <= 0) {
+              // Already expired — end immediately
+              log(`Meeting ${roomId} already expired, ending now`, "socket.io");
               try {
-                // Generate token for waiting participant
-                const result = await generateToken(roomId, waitingData.displayName);
-                
-                // Mark as admitted in database
-                await db.update(meetingParticipants)
-                  .set({ status: 'admitted', admittedAt: new Date() })
-                  .where(and(
-                    eq(meetingParticipants.roomId, roomId),
-                    eq(meetingParticipants.visitorId, waitingData.visitorId)
-                  ));
-                
-                // Send admission to waiting socket
-                io.to(waitingSocketId).emit("admitted", { 
-                  roomId, 
-                  token: result.token, 
-                  serverUrl: result.serverUrl 
-                });
-                
-                log(`Admitted waiting participant ${waitingData.displayName} to room ${roomId}`, "socket.io");
-              } catch (error: any) {
-                log(`Error admitting participant: ${error.message}`, "socket.io");
+                await endMeetingForAll(roomId);
+                await db.update(meetings).set({ endedAt: new Date() }).where(eq(meetings.roomId, roomId));
+                io.to(`reactions:${roomId}`).emit("meeting-ended", { roomId, reason: "duration" });
+              } catch (err: any) {
+                log(`Error ending expired meeting ${roomId}: ${err.message}`, "socket.io");
               }
+            } else {
+              const timers: NodeJS.Timeout[] = [];
+
+              const scheduleWarning = (minutesMark: number) => {
+                const delay = msRemaining - minutesMark * 60 * 1000;
+                if (delay > 0) {
+                  timers.push(setTimeout(() => {
+                    io.to(`reactions:${roomId}`).emit("meeting-warning", { roomId, minutesRemaining: minutesMark });
+                    log(`Meeting ${roomId} warning: ${minutesMark} min remaining`, "socket.io");
+                  }, delay));
+                }
+              };
+
+              scheduleWarning(10);
+              scheduleWarning(4);
+              scheduleWarning(1);
+
+              timers.push(setTimeout(async () => {
+                try {
+                  await endMeetingForAll(roomId);
+                  await db.update(meetings).set({ endedAt: new Date() }).where(eq(meetings.roomId, roomId));
+                  io.to(`reactions:${roomId}`).emit("meeting-ended", { roomId, reason: "duration" });
+                  roomDurationTimers.delete(roomId);
+                  log(`Meeting ${roomId} auto-ended after duration`, "socket.io");
+                } catch (err: any) {
+                  log(`Error auto-ending meeting ${roomId}: ${err.message}`, "socket.io");
+                }
+              }, msRemaining));
+
+              roomDurationTimers.set(roomId, timers);
+              log(`Duration timers set for meeting ${roomId}, ${Math.round(msRemaining / 1000)}s remaining`, "socket.io");
             }
-            
-            // Cleanup
-            waitingParticipantData.delete(waitingSocketId);
           }
-          waitingRooms.delete(roomId);
+        } catch (err: any) {
+          log(`Error fetching meeting settings for ${roomId}: ${err.message}`, "socket.io");
+        }
+
+        // Handle waiting participants
+        const waitingSet = waitingRooms.get(roomId);
+        if (waitingSet && waitingSet.size > 0) {
+          if (waitingRoomEnabled) {
+            // Waiting room ON: notify host to manually admit each participant
+            const waitingList = Array.from(waitingSet).map(socketId => {
+              const wd = waitingParticipantData.get(socketId);
+              return wd ? { socketId, displayName: wd.displayName, joinedAt: Date.now() } : null;
+            }).filter(Boolean) as Array<{ socketId: string; displayName: string; joinedAt: number }>;
+
+            socket.emit("waiting-participants-list", { roomId, participants: waitingList });
+            log(`Sent ${waitingList.length} waiting participant(s) list to host for room ${roomId}`, "socket.io");
+          } else {
+            // Waiting room OFF: auto-admit all waiting participants
+            const waitingSocketIds = Array.from(waitingSet);
+            for (const waitingSocketId of waitingSocketIds) {
+              const waitingData = waitingParticipantData.get(waitingSocketId);
+              if (waitingData) {
+                try {
+                  const result = await generateToken(roomId, waitingData.displayName);
+                  await db.update(meetingParticipants)
+                    .set({ status: 'admitted', admittedAt: new Date() })
+                    .where(and(
+                      eq(meetingParticipants.roomId, roomId),
+                      eq(meetingParticipants.visitorId, waitingData.visitorId)
+                    ));
+                  io.to(waitingSocketId).emit("admitted", { roomId, token: result.token, serverUrl: result.serverUrl });
+                  log(`Auto-admitted waiting participant ${waitingData.displayName} to room ${roomId}`, "socket.io");
+                } catch (error: any) {
+                  log(`Error admitting participant: ${error.message}`, "socket.io");
+                }
+              }
+              waitingParticipantData.delete(waitingSocketId);
+            }
+            waitingRooms.delete(roomId);
+          }
         }
       } else {
-        // Host left - keep presence record but mark as gone
         hostPresence.delete(roomId);
         log(`Host left room ${roomId}`, "socket.io");
-        
-        // Notify room that host left (existing participants can stay)
         io.to(roomId).emit("host-left", { roomId });
       }
     });
@@ -240,32 +297,93 @@ export async function registerRoutes(
     // Join waiting room
     socket.on("join-waiting-room", async (data) => {
       const { roomId, visitorId, displayName } = data;
-      
-      // Add to waiting room
+
       if (!waitingRooms.has(roomId)) {
         waitingRooms.set(roomId, new Set());
       }
       waitingRooms.get(roomId)!.add(socket.id);
-      
-      // Store waiting participant data
       waitingParticipantData.set(socket.id, { roomId, visitorId, displayName });
-      
-      // Join waiting socket room for notifications
       socket.join(`waiting:${roomId}`);
-      
-      // Record in database
+
       try {
-        await db.insert(meetingParticipants).values({
-          roomId,
-          visitorId,
-          displayName,
-          status: 'waiting',
-        });
+        await db.insert(meetingParticipants).values({ roomId, visitorId, displayName, status: 'waiting' });
       } catch (error: any) {
         log(`Error recording waiting participant: ${error.message}`, "socket.io");
       }
-      
+
+      // Broadcast to the reactions room — all meeting participants (including the host)
+      // have already joined this room synchronously via join-reaction-room.
+      // Non-host clients discard the event on the client side.
+      io.to(`reactions:${roomId}`).emit("waiting-participant-joined", {
+        roomId,
+        socketId: socket.id,
+        displayName,
+        joinedAt: Date.now(),
+      });
+
       log(`Participant ${displayName} joined waiting room for ${roomId}`, "socket.io");
+    });
+
+    // Admit a specific waiting participant (host only)
+    socket.on("admit-participant", async (data) => {
+      const { roomId, socketId } = data;
+      const waitingData = waitingParticipantData.get(socketId);
+      if (!waitingData || waitingData.roomId !== roomId) {
+        log(`admit-participant: no waiting data for socket ${socketId}`, "socket.io");
+        return;
+      }
+
+      try {
+        const result = await generateToken(roomId, waitingData.displayName);
+        await db.update(meetingParticipants)
+          .set({ status: 'admitted', admittedAt: new Date() })
+          .where(and(
+            eq(meetingParticipants.roomId, roomId),
+            eq(meetingParticipants.visitorId, waitingData.visitorId)
+          ));
+        io.to(socketId).emit("admitted", { roomId, token: result.token, serverUrl: result.serverUrl });
+
+        const waitingSet = waitingRooms.get(roomId);
+        if (waitingSet) {
+          waitingSet.delete(socketId);
+          if (waitingSet.size === 0) waitingRooms.delete(roomId);
+        }
+        waitingParticipantData.delete(socketId);
+        log(`Host admitted participant ${waitingData.displayName} to room ${roomId}`, "socket.io");
+      } catch (error: any) {
+        log(`Error admitting participant: ${error.message}`, "socket.io");
+      }
+    });
+
+    // Decline a specific waiting participant (host only)
+    socket.on("decline-participant", async (data) => {
+      const { roomId, socketId } = data;
+      const waitingData = waitingParticipantData.get(socketId);
+      if (!waitingData || waitingData.roomId !== roomId) {
+        log(`decline-participant: no waiting data for socket ${socketId}`, "socket.io");
+        return;
+      }
+
+      io.to(socketId).emit("declined", { roomId });
+
+      try {
+        await db.update(meetingParticipants)
+          .set({ status: 'declined' })
+          .where(and(
+            eq(meetingParticipants.roomId, roomId),
+            eq(meetingParticipants.visitorId, waitingData.visitorId)
+          ));
+      } catch (err: any) {
+        log(`Error updating declined status: ${err.message}`, "socket.io");
+      }
+
+      const waitingSet = waitingRooms.get(roomId);
+      if (waitingSet) {
+        waitingSet.delete(socketId);
+        if (waitingSet.size === 0) waitingRooms.delete(roomId);
+      }
+      waitingParticipantData.delete(socketId);
+      log(`Host declined participant ${waitingData.displayName} from room ${roomId}`, "socket.io");
     });
 
     // Join reaction room for receiving emoji reactions
@@ -336,6 +454,11 @@ export async function registerRoutes(
           }
         }
         waitingParticipantData.delete(socket.id);
+        // Tell the host (and all meeting participants) this person left the waiting room
+        io.to(`reactions:${waitingData.roomId}`).emit("waiting-participant-left", {
+          roomId: waitingData.roomId,
+          socketId: socket.id,
+        });
       }
       
       if (participantId && roomId) {
@@ -451,12 +574,14 @@ export async function registerRoutes(
       
       const hasExistingHost = existingHost.length > 0;
       
-      // Check if this specific visitor was previously marked as host
+      // Check if this specific visitor was previously marked as host (most recent record)
       const [existingParticipant] = await db.select().from(meetingParticipants)
         .where(and(
           eq(meetingParticipants.roomId, roomId),
           eq(meetingParticipants.visitorId, visitorId)
-        ));
+        ))
+        .orderBy(desc(meetingParticipants.createdAt))
+        .limit(1);
       
       const isReturningHost = existingParticipant?.isHost === true;
       const wasAdmitted = existingParticipant?.status === 'admitted';
@@ -466,10 +591,10 @@ export async function registerRoutes(
       // 2. Is returning as previously marked host (same person with hostToken who joined before)
       // NOTE: We removed the fallback that made first joiner host - only creator can be host
       const isHostParticipant = isValidHostToken || isReturningHost;
-      
+
       // Check if host is present in the room
       const hostIsPresent = hostPresence.has(roomId);
-      
+
       // If meeting has ended and participant is NOT host, they must wait
       if (meetingHasEnded && !isHostParticipant) {
         log(`Meeting ${roomId} has ended - participant ${participantName} must wait for host`, "api");
@@ -485,7 +610,26 @@ export async function registerRoutes(
         await db.update(meetings)
           .set({ endedAt: null })
           .where(eq(meetings.roomId, roomId));
+        // Clear any stale duration timers so new timers are set when host re-emits presence
+        const staleTimers = roomDurationTimers.get(roomId);
+        if (staleTimers) {
+          staleTimers.forEach(t => clearTimeout(t));
+          roomDurationTimers.delete(roomId);
+        }
         log(`Host rejoined ended meeting ${roomId} - meeting reactivated`, "api");
+      }
+
+      // Passcode validation — skip only for host or a participant already in the waiting queue
+      // (being in 'waiting' means they already passed the passcode check to enter the queue)
+      const alreadyInWaiting = existingParticipant?.status === 'waiting';
+      if (meeting?.passcode && !isHostParticipant && !alreadyInWaiting) {
+        const providedPasscode = req.body.passcode;
+        if (!providedPasscode) {
+          return res.json({ status: "passcode_required" });
+        }
+        if (providedPasscode !== meeting.passcode) {
+          return res.json({ status: "invalid_passcode", message: "Incorrect passcode. Please try again." });
+        }
       }
 
       // If participant is host, or was previously admitted, or host is present - allow entry
@@ -517,12 +661,14 @@ export async function registerRoutes(
         }
         
         log(`Participant ${participantName} joined room ${roomId} (isHost: ${isHostParticipant})`, "api");
-        
+
         return res.json({
           status: 'admitted',
           token: result.token,
           serverUrl: result.serverUrl,
           isHost: isHostParticipant,
+          scheduledAt: meeting?.scheduledAt?.toISOString(),
+          duration: meeting?.duration,
         });
       } else {
         // Host not present and not previously admitted - must wait
@@ -584,6 +730,36 @@ export async function registerRoutes(
     res.json({ 
       hostIdentity: hostIdentity || null,
     });
+  });
+
+  // Returns the current in-memory waiting-room list for a room (used by the host on mount)
+  app.get("/api/meetings/:roomId/waiting-room", (req, res) => {
+    const { roomId } = req.params;
+    const waitingSet = waitingRooms.get(roomId);
+    if (!waitingSet || waitingSet.size === 0) {
+      return res.json({ participants: [] });
+    }
+    const participants = Array.from(waitingSet)
+      .map(socketId => {
+        const wd = waitingParticipantData.get(socketId);
+        return wd ? { socketId, displayName: wd.displayName, joinedAt: Date.now() } : null;
+      })
+      .filter(Boolean);
+    res.json({ participants });
+  });
+
+  // Returns whether a meeting requires a passcode (safe — never exposes the actual passcode)
+  app.get("/api/meetings/:roomId/passcode-status", async (req, res) => {
+    try {
+      const { roomId } = req.params;
+      const [meeting] = await db
+        .select({ passcode: meetings.passcode })
+        .from(meetings)
+        .where(eq(meetings.roomId, roomId));
+      res.json({ hasPasscode: !!(meeting?.passcode) });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
   });
 
   // Meetings API routes
@@ -662,12 +838,19 @@ export async function registerRoutes(
   app.patch("/api/meetings/:roomId/end", async (req, res) => {
     try {
       const { roomId } = req.params;
-      
+
+      // Cancel any active duration timers for this meeting
+      const activeTimers = roomDurationTimers.get(roomId);
+      if (activeTimers) {
+        activeTimers.forEach(t => clearTimeout(t));
+        roomDurationTimers.delete(roomId);
+      }
+
       const liveKitResult = await endMeetingForAll(roomId);
       if (!liveKitResult.success) {
         log(`Warning: Could not disconnect participants: ${liveKitResult.error}`, "api");
       }
-      
+
       const [updated] = await db.update(meetings)
         .set({ endedAt: new Date() })
         .where(eq(meetings.roomId, roomId))
@@ -1213,7 +1396,8 @@ export async function registerRoutes(
             .values({
               roomId,
               meetingId: meeting?.id || null,
-              hostId: hostId ? parseInt(hostId) : null,
+              // hostId: hostId ? parseInt(hostId) : null,
+              hostId: hostId && hostId !== "0" ? parseInt(hostId) : null,
               filename,
               originalFilename,
               fileSize: buffer.length,

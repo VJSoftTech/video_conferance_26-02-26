@@ -12,9 +12,10 @@ import "@livekit/components-styles";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import { useToast } from "@/hooks/use-toast";
 import { useRecording } from "@/hooks/use-recording";
-import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users, ChevronUp, ChevronDown } from "lucide-react";
+import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users, ChevronUp, ChevronDown, Lock, UserCheck, UserX, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { ParticipantTile } from "@/components/meeting/participant-tile";
 import { ControlBar } from "@/components/meeting/control-bar";
 import { ParticipantsPanel } from "@/components/meeting/participants-panel";
@@ -173,14 +174,39 @@ function MeetingContent({
   const [isChatPanelOpen, setIsChatPanelOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<Array<{ id: string; senderId: string; senderName: string; content: string; timestamp: number }>>([]);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+  const [waitingParticipants, setWaitingParticipants] = useState<Array<{ socketId: string; displayName: string; joinedAt: number }>>([]);
+  const [showWaitingPanel, setShowWaitingPanel] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
   const reactionTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const isChatPanelOpenRef = useRef(isChatPanelOpen);
   const localParticipantIdRef = useRef(localParticipant.identity);
+  const sentWarningsRef = useRef<Set<number>>(new Set());
+  const meetingEndedRef = useRef(false);
+  const onLeaveRef = useRef(onLeave);
 
+  useEffect(() => { onLeaveRef.current = onLeave; }, [onLeave]);
   useEffect(() => { isChatPanelOpenRef.current = isChatPanelOpen; }, [isChatPanelOpen]);
   useEffect(() => { localParticipantIdRef.current = localParticipant.identity; }, [localParticipant.identity]);
+
+  // Auto-close waiting panel when all waiting participants have been handled
+  useEffect(() => {
+    if (waitingParticipants.length === 0) setShowWaitingPanel(false);
+  }, [waitingParticipants.length]);
+
+  // Host: fetch any participants already waiting when the meeting room first loads
+  useEffect(() => {
+    if (!isHost) return;
+    fetch(`/api/meetings/${roomId}/waiting-room`)
+      .then(r => r.json())
+      .then((data: { participants: Array<{ socketId: string; displayName: string; joinedAt: number }> }) => {
+        if (data.participants && data.participants.length > 0) {
+          setWaitingParticipants(data.participants);
+          setShowWaitingPanel(true);
+        }
+      })
+      .catch(() => { /* non-fatal — socket events will cover real-time updates */ });
+  }, [isHost, roomId]);
 
   const handleMuteParticipant = useCallback(
     async (participantIdentity: string, trackType: "audio" | "video", muted: boolean) => {
@@ -319,6 +345,61 @@ function MeetingContent({
           if (!isChatPanelOpenRef.current && data.senderId !== localParticipantIdRef.current) {
             setUnreadMessageCount((c) => c + 1);
           }
+        });
+
+        // Waiting room: new participant joined (host sees this)
+        socket.on("waiting-participant-joined", (data: { roomId: string; socketId: string; displayName: string; joinedAt: number }) => {
+          if (!isHost) return;
+          setWaitingParticipants(prev => {
+            if (prev.some(p => p.socketId === data.socketId)) return prev;
+            return [...prev, { socketId: data.socketId, displayName: data.displayName, joinedAt: data.joinedAt }];
+          });
+          setShowWaitingPanel(true);
+          toast({ title: "Waiting Room", description: `${data.displayName} is waiting to join`, duration: 5000 });
+        });
+
+        // Waiting room: full list sent to host on join (backup for pre-existing waiters)
+        socket.on("waiting-participants-list", (data: { roomId: string; participants: Array<{ socketId: string; displayName: string; joinedAt: number }> }) => {
+          if (!isHost || data.participants.length === 0) return;
+          setWaitingParticipants(prev => {
+            // Merge — keep any entries already added via waiting-participant-joined
+            const merged = [...data.participants];
+            prev.forEach(p => {
+              if (!merged.some(m => m.socketId === p.socketId)) merged.push(p);
+            });
+            return merged;
+          });
+          setShowWaitingPanel(true);
+          toast({ title: "Waiting Room", description: `${data.participants.length} participant(s) waiting to join`, duration: 5000 });
+        });
+
+        // Waiting room: a waiting participant disconnected — remove from host's list
+        socket.on("waiting-participant-left", (data: { socketId: string }) => {
+          setWaitingParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
+        });
+
+        // Meeting duration warning
+        socket.on("meeting-warning", (data: { minutesRemaining: number }) => {
+          if (sentWarningsRef.current.has(data.minutesRemaining)) return;
+          sentWarningsRef.current.add(data.minutesRemaining);
+          const mins = data.minutesRemaining;
+          toast({
+            title: `Meeting ending in ${mins} minute${mins !== 1 ? "s" : ""}`,
+            description: `This meeting will automatically end in ${mins} minute${mins !== 1 ? "s" : ""}.`,
+            duration: 10000,
+          });
+        });
+
+        // Meeting auto-ended by duration
+        socket.on("meeting-ended", () => {
+          if (meetingEndedRef.current) return;
+          meetingEndedRef.current = true;
+          toast({
+            title: "Meeting Ended",
+            description: "Meeting has ended. The scheduled duration has been completed.",
+            duration: 5000,
+          });
+          setTimeout(() => onLeaveRef.current(), 3000);
         });
 
         socketRef.current = socket;
@@ -631,6 +712,16 @@ function MeetingContent({
     onLeave();
   }, [roomId, onLeave, toast]);
 
+  const handleAdmitParticipant = useCallback((socketId: string) => {
+    socketRef.current?.emit("admit-participant", { roomId, socketId });
+    setWaitingParticipants(prev => prev.filter(p => p.socketId !== socketId));
+  }, [roomId]);
+
+  const handleDeclineParticipant = useCallback((socketId: string) => {
+    socketRef.current?.emit("decline-participant", { roomId, socketId });
+    setWaitingParticipants(prev => prev.filter(p => p.socketId !== socketId));
+  }, [roomId]);
+
   const gridClass = useMemo(() => {
     if (screenShareTrack) return "grid-cols-1";
     if (visibleParticipants.length === 1) return "grid-cols-1";
@@ -801,6 +892,63 @@ function MeetingContent({
         />
       </div>
 
+      {/* Waiting room badge — visible to host when participants are waiting */}
+      {isHost && waitingParticipants.length > 0 && (
+        <button
+          onClick={() => setShowWaitingPanel(v => !v)}
+          className="fixed top-20 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-white rounded-lg shadow-lg text-sm font-medium transition-colors"
+        >
+          <Users className="w-4 h-4" />
+          {waitingParticipants.length} Waiting
+        </button>
+      )}
+
+      {/* Waiting room panel — host can admit or decline each participant */}
+      {isHost && showWaitingPanel && waitingParticipants.length > 0 && (
+        <div className="fixed top-36 right-4 z-50 w-72 bg-card border border-border rounded-xl shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+            <h3 className="font-semibold text-sm flex items-center gap-2">
+              <Users className="w-4 h-4 text-amber-400" />
+              Waiting Room ({waitingParticipants.length})
+            </h3>
+            <button onClick={() => setShowWaitingPanel(false)} className="text-muted-foreground hover:text-foreground">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="max-h-64 overflow-y-auto p-2 space-y-2">
+            {waitingParticipants.map(p => (
+              <div key={p.socketId} className="flex items-center justify-between gap-2 p-2 bg-muted/50 rounded-lg">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shrink-0 text-xs font-semibold">
+                    {p.displayName.slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{p.displayName}</p>
+                    <p className="text-xs text-muted-foreground">Waiting to join</p>
+                  </div>
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  <button
+                    onClick={() => handleAdmitParticipant(p.socketId)}
+                    title="Admit"
+                    className="p-1.5 rounded-md bg-green-500/20 hover:bg-green-500/40 text-green-400 transition-colors"
+                  >
+                    <UserCheck className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => handleDeclineParticipant(p.socketId)}
+                    title="Decline"
+                    className="p-1.5 rounded-md bg-red-500/20 hover:bg-red-500/40 text-red-400 transition-colors"
+                  >
+                    <UserX className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <RoomAudioRenderer />
     </div>
   );
@@ -824,6 +972,10 @@ export default function MeetingRoomLiveKit() {
   const [serverUrl, setServerUrl] = useState(DEFAULT_LIVEKIT_URL);
   const [isConnecting, setIsConnecting] = useState(true);
   const [isWaiting, setIsWaiting] = useState(false);
+  const [isDeclined, setIsDeclined] = useState(false);
+  const [isPasscodeRequired, setIsPasscodeRequired] = useState(false);
+  const [enteredPasscode, setEnteredPasscode] = useState("");
+  const [passcodeError, setPasscodeError] = useState("");
   const [error, setError] = useState("");
   const [isHost, setIsHost] = useState(false);
   const [participantName, setParticipantName] = useState<string | null>(null);
@@ -842,12 +994,19 @@ export default function MeetingRoomLiveKit() {
     setHasCheckedStorage(true);
   }, []);
 
-  const fetchToken = useCallback(async (name: string) => {
+  const fetchToken = useCallback(async (name: string, passcode?: string) => {
     try {
+      // Use the passcode passed directly (from the in-room screen) or the one
+      // stored by the pre-join page, whichever is available.
+      const resolvedPasscode =
+        passcode !== undefined
+          ? passcode
+          : (sessionStorage.getItem(`join_passcode_${params.roomId}`) ?? undefined);
+
       const response = await fetch(`/api/meetings/${params.roomId}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantName: name, visitorId, hostToken }),
+        body: JSON.stringify({ participantName: name, visitorId, hostToken, passcode: resolvedPasscode }),
       });
       if (!response.ok) {
         const data = await response.json();
@@ -855,12 +1014,27 @@ export default function MeetingRoomLiveKit() {
       }
       const data = await response.json();
 
+      // Passcode required — show entry screen
+      if (data.status === "passcode_required") {
+        setIsPasscodeRequired(true);
+        setIsConnecting(false);
+        return;
+      }
+
+      // Wrong passcode — show error on entry screen
+      if (data.status === "invalid_passcode") {
+        setIsPasscodeRequired(true);
+        setPasscodeError(data.message || "Incorrect passcode. Please try again.");
+        setIsConnecting(false);
+        return;
+      }
+
       if (data.status === "waiting") {
         setIsWaiting(true);
         setIsConnecting(false);
         if (!socketRef.current) {
-          const socket = io({ 
-            path: "/socket.io", 
+          const socket = io({
+            path: "/socket.io",
             transports: ["websocket", "polling"],
             reconnection: true,
             reconnectionDelay: 1000,
@@ -878,9 +1052,15 @@ export default function MeetingRoomLiveKit() {
             socket.disconnect();
             socketRef.current = null;
           });
+          socket.on("declined", () => {
+            setIsDeclined(true);
+            setIsWaiting(false);
+            socket.disconnect();
+            socketRef.current = null;
+          });
           socket.on("host-joined", () => fetchToken(name));
-          socket.on("connect_error", (error) => {
-            console.error("[Waiting Room Socket] Connection error:", error);
+          socket.on("connect_error", (err) => {
+            console.error("[Waiting Room Socket] Connection error:", err);
             toast({ title: "Connection Error", description: "Failed to connect to waiting room", variant: "destructive" });
           });
         }
@@ -893,12 +1073,16 @@ export default function MeetingRoomLiveKit() {
       if (data.serverUrl) setServerUrl(data.serverUrl);
       setIsWaiting(false);
       setIsConnecting(false);
+      setIsPasscodeRequired(false);
+      setPasscodeError("");
       setError("");
+      // Remove the passcode stored by the pre-join page — it's no longer needed
+      sessionStorage.removeItem(`join_passcode_${params.roomId}`);
     } catch (err: any) {
-      if (retryCountRef.current < 3) { 
-        retryCountRef.current++; 
-        setTimeout(() => fetchToken(name), 2000); 
-        return; 
+      if (retryCountRef.current < 3) {
+        retryCountRef.current++;
+        setTimeout(() => fetchToken(name), 2000);
+        return;
       }
       setError(err.message);
       setIsConnecting(false);
@@ -944,7 +1128,59 @@ export default function MeetingRoomLiveKit() {
     }
   }, [intentionalLeave, toast]);
 
+  const handlePasscodeSubmit = useCallback(() => {
+    if (!participantName || !enteredPasscode.trim()) return;
+    retryCountRef.current = 0;
+    setIsPasscodeRequired(false);
+    setPasscodeError("");
+    setIsConnecting(true);
+    fetchToken(participantName, enteredPasscode.trim());
+  }, [participantName, enteredPasscode, fetchToken]);
+
   if (!hasCheckedStorage || !participantName) return null;
+
+  if (isPasscodeRequired) return (
+    <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="w-full max-w-sm px-4 text-center space-y-4">
+        <div className="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto">
+          <Lock className="w-8 h-8 text-amber-400" />
+        </div>
+        <h2 className="text-xl font-semibold">Passcode Required</h2>
+        <p className="text-muted-foreground text-sm">This meeting is protected. Enter the passcode to join.</p>
+        <div className="space-y-3">
+          <Input
+            type="password"
+            placeholder="Enter passcode"
+            value={enteredPasscode}
+            onChange={(e) => { setEnteredPasscode(e.target.value.toUpperCase()); setPasscodeError(""); }}
+            onKeyDown={(e) => e.key === "Enter" && handlePasscodeSubmit()}
+            className="text-center font-mono text-lg tracking-widest"
+            autoFocus
+          />
+          {passcodeError && <p className="text-sm text-destructive">{passcodeError}</p>}
+          <Button className="w-full" onClick={handlePasscodeSubmit} disabled={!enteredPasscode.trim()}>
+            Join Meeting
+          </Button>
+          <Button variant="outline" className="w-full" onClick={() => setLocation("/")}>
+            <ArrowLeft className="w-4 h-4 mr-2" />Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+
+  if (isDeclined) return (
+    <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="text-center max-w-md px-4">
+        <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center mx-auto mb-4">
+          <UserX className="w-8 h-8 text-destructive" />
+        </div>
+        <h2 className="text-xl font-semibold mb-2">Entry Declined</h2>
+        <p className="text-muted-foreground mb-6">The host declined your request to join the meeting.</p>
+        <Button onClick={() => setLocation("/")}><ArrowLeft className="w-4 h-4 mr-2" />Go Back Home</Button>
+      </div>
+    </div>
+  );
 
   if (isConnecting) return (
     <div className="min-h-screen bg-background flex items-center justify-center" data-testid="connecting-state">
@@ -962,8 +1198,8 @@ export default function MeetingRoomLiveKit() {
         <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-6">
           <Clock className="w-10 h-10 text-primary animate-pulse" />
         </div>
-        <h2 className="text-2xl font-semibold mb-3">Waiting for Host</h2>
-        <p className="text-muted-foreground mb-6">Please wait while the meeting host starts the session. You will be admitted automatically once the host joins.</p>
+        <h2 className="text-2xl font-semibold mb-3">Please Wait</h2>
+        <p className="text-muted-foreground mb-6">Please wait. The host will admit you shortly.</p>
         <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground mb-6">
           <Users className="w-4 h-4" /><span>Room: {params.roomId}</span>
         </div>

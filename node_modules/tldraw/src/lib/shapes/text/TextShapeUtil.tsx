@@ -43,6 +43,8 @@ const sizeCache = createComputedCache(
 export interface TextShapeOptions {
 	/** How much addition padding should be added to the horizontal geometry of the shape when binding to an arrow? */
 	extraArrowHorizontalPadding: number
+	/** Whether to show the outline of the text shape (using the same color as the canvas). This helps with overlapping shapes. It does not show up on Safari, where text outline is a performance issues. */
+	showTextOutline: boolean
 }
 
 /** @public */
@@ -53,6 +55,7 @@ export class TextShapeUtil extends ShapeUtil<TLTextShape> {
 
 	override options: TextShapeOptions = {
 		extraArrowHorizontalPadding: 10,
+		showTextOutline: true,
 	}
 
 	getDefaultProps(): TLTextShape['props'] {
@@ -140,6 +143,7 @@ export class TextShapeUtil extends ShapeUtil<TLTextShape> {
 				isSelected={isSelected}
 				textWidth={width}
 				textHeight={height}
+				showTextOutline={this.options.showTextOutline}
 				style={{
 					transform: `scale(${scale})`,
 					transformOrigin: 'top left',
@@ -155,6 +159,18 @@ export class TextShapeUtil extends ShapeUtil<TLTextShape> {
 		const editor = useEditor()
 		if (shape.props.autoSize && editor.getEditingShapeId() === shape.id) return null
 		return <rect width={toDomPrecision(bounds.width)} height={toDomPrecision(bounds.height)} />
+	}
+
+	override useLegacyIndicator() {
+		return false
+	}
+
+	override getIndicatorPath(shape: TLTextShape): Path2D | undefined {
+		if (shape.props.autoSize && this.editor.getEditingShapeId() === shape.id) return undefined
+		const bounds = this.editor.getShapeGeometry(shape).bounds
+		const path = new Path2D()
+		path.rect(0, 0, bounds.width, bounds.height)
+		return path
 	}
 
 	override toSvg(shape: TLTextShape, ctx: SvgExportContext) {
@@ -175,6 +191,7 @@ export class TextShapeUtil extends ShapeUtil<TLTextShape> {
 				labelColor={getColorValue(theme, shape.props.color, 'solid')}
 				bounds={exportBounds}
 				padding={0}
+				showTextOutline={this.options.showTextOutline}
 			/>
 		)
 	}

@@ -15,6 +15,11 @@ export default function PreJoin() {
   const [, setLocation] = useLocation();
   const [name, setName] = useState("");
 
+  // Passcode state — only shown when the meeting requires one
+  const [hasPasscode, setHasPasscode] = useState(false);
+  const [passcode, setPasscode] = useState("");
+  const [passcodeError, setPasscodeError] = useState("");
+
   // Get host token from URL if present (for meeting creators)
   const urlParams = new URLSearchParams(window.location.search);
   const hostToken = urlParams.get("host");
@@ -28,12 +33,30 @@ export default function PreJoin() {
     setVideoDevice,
   } = useMediaDevices();
 
+  // Check once on mount whether this meeting needs a passcode.
+  // Hosts (with a host token) are never asked for a passcode.
+  useEffect(() => {
+    if (hostToken) return;
+    fetch(`/api/meetings/${params.roomId}/passcode-status`)
+      .then(r => r.json())
+      .then(data => { if (data.hasPasscode) setHasPasscode(true); })
+      .catch(() => { /* will be caught by the join API if needed */ });
+  }, [params.roomId, hostToken]);
+
   const handleJoin = () => {
     if (!name.trim()) return;
+    if (hasPasscode && !passcode.trim()) {
+      setPasscodeError("Please enter the meeting passcode.");
+      return;
+    }
     sessionStorage.setItem("participantName", name.trim());
     sessionStorage.setItem("audioEnabled", "false");
     sessionStorage.setItem("videoEnabled", "false");
     sessionStorage.removeItem("isHost");
+    // Store the passcode so the meeting room can include it in the join request
+    if (passcode.trim()) {
+      sessionStorage.setItem(`join_passcode_${params.roomId}`, passcode.trim().toUpperCase());
+    }
     // Pass host token through if present
     const hostQuery = hostToken ? `?host=${hostToken}` : "";
     setLocation(`/room/${params.roomId}${hostQuery}`);
@@ -116,6 +139,27 @@ export default function PreJoin() {
                   />
                 </div>
 
+                {hasPasscode && (
+                  <div className="space-y-2">
+                    <Label htmlFor="passcode">Meeting Passcode</Label>
+                    <Input
+                      id="passcode"
+                      type="password"
+                      placeholder="Enter meeting passcode"
+                      value={passcode}
+                      onChange={(e) => {
+                        setPasscode(e.target.value.toUpperCase());
+                        setPasscodeError("");
+                      }}
+                      onKeyPress={(e) => e.key === "Enter" && handleJoin()}
+                      data-testid="input-passcode"
+                    />
+                    {passcodeError && (
+                      <p className="text-sm text-destructive">{passcodeError}</p>
+                    )}
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="microphone">Microphone</Label>
                   <Select
@@ -172,7 +216,7 @@ export default function PreJoin() {
                   className="w-full"
                   size="lg"
                   onClick={handleJoin}
-                  disabled={!name.trim()}
+                  disabled={!name.trim() || (hasPasscode && !passcode.trim())}
                   data-testid="button-join-now"
                 >
                   Join Now

@@ -8,7 +8,6 @@ import {
 	resizeBox,
 	StateNode,
 	T,
-	TLBaseShape,
 	TLEventHandlers,
 	TLGeoShape,
 	TLResizeInfo,
@@ -19,19 +18,24 @@ import {
 } from '@tldraw/editor'
 import { TestEditor } from './TestEditor'
 
-// Custom Circle Clip Shape Definition
-export type CircleClipShape = TLBaseShape<
-	'circle-clip',
-	{
-		w: number
-		h: number
+const CIRCLE_CLIP_TYPE = 'circle-clip'
+
+declare module '@tldraw/tlschema' {
+	export interface TLGlobalShapePropsMap {
+		[CIRCLE_CLIP_TYPE]: { w: number; h: number }
 	}
->
+}
+
+// Custom Circle Clip Shape Definition
+export type CircleClipShape = TLShape<typeof CIRCLE_CLIP_TYPE>
 
 export const isClippingEnabled$ = atom('isClippingEnabled', true)
 
+// The stroke width used when rendering the circle
+const STROKE_WIDTH = 2
+
 export class CircleClipShapeUtil extends BaseBoxShapeUtil<CircleClipShape> {
-	static override type = 'circle-clip' as const
+	static override type = CIRCLE_CLIP_TYPE
 	static override props: RecordProps<CircleClipShape> = {
 		w: T.number,
 		h: T.number,
@@ -63,17 +67,20 @@ export class CircleClipShapeUtil extends BaseBoxShapeUtil<CircleClipShape> {
 	}
 
 	override getClipPath(shape: CircleClipShape): Vec[] | undefined {
-		// Generate a polygon approximation of the circle
+		// Generate a polygon approximation of the circle.
+		// We inset the clip path by half the stroke width so that children are
+		// clipped to the inner edge of the stroke, not the center line.
 		const centerX = shape.props.w / 2
 		const centerY = shape.props.h / 2
-		const radius = Math.min(shape.props.w, shape.props.h) / 2
+		const outerRadius = Math.min(shape.props.w, shape.props.h) / 2
+		const clipRadius = outerRadius - STROKE_WIDTH / 2
 		const segments = 48 // More segments = smoother circle
 
 		const points: Vec[] = []
 		for (let i = 0; i < segments; i++) {
 			const angle = (i / segments) * Math.PI * 2
-			const x = centerX + Math.cos(angle) * radius
-			const y = centerY + Math.sin(angle) * radius
+			const x = centerX + Math.cos(angle) * clipRadius
+			const y = centerY + Math.sin(angle) * clipRadius
 			points.push(new Vec(x, y))
 		}
 
@@ -111,10 +118,10 @@ export class CircleClipShapeTool extends StateNode {
 
 	override onPointerDown(info: Parameters<TLEventHandlers['onPointerDown']>[0]) {
 		if (info.target === 'canvas') {
-			const { originPagePoint } = this.editor.inputs
+			const originPagePoint = this.editor.inputs.getOriginPagePoint()
 
-			this.editor.createShape<CircleClipShape>({
-				type: 'circle-clip',
+			this.editor.createShape({
+				type: CIRCLE_CLIP_TYPE,
 				x: originPagePoint.x - 100,
 				y: originPagePoint.y - 100,
 				props: {
@@ -153,9 +160,9 @@ beforeEach(() => {
 describe('CircleClipShapeUtil', () => {
 	describe('shape creation and properties', () => {
 		it('should create a circle clip shape with default properties', () => {
-			editor.createShape<CircleClipShape>({
+			editor.createShape({
 				id: ids.circleClip1,
-				type: 'circle-clip',
+				type: CIRCLE_CLIP_TYPE,
 				x: 100,
 				y: 100,
 				props: {
@@ -172,9 +179,9 @@ describe('CircleClipShapeUtil', () => {
 		})
 
 		it('should use default props when not specified', () => {
-			editor.createShape<CircleClipShape>({
+			editor.createShape({
 				id: ids.circleClip1,
-				type: 'circle-clip',
+				type: CIRCLE_CLIP_TYPE,
 				x: 100,
 				y: 100,
 				props: {},
@@ -188,9 +195,9 @@ describe('CircleClipShapeUtil', () => {
 
 	describe('geometry and clipping', () => {
 		it('should generate correct circle geometry', () => {
-			editor.createShape<CircleClipShape>({
+			editor.createShape({
 				id: ids.circleClip1,
-				type: 'circle-clip',
+				type: CIRCLE_CLIP_TYPE,
 				x: 100,
 				y: 100,
 				props: {
@@ -210,9 +217,9 @@ describe('CircleClipShapeUtil', () => {
 		})
 
 		it('should generate clip path for circle', () => {
-			editor.createShape<CircleClipShape>({
+			editor.createShape({
 				id: ids.circleClip1,
-				type: 'circle-clip',
+				type: CIRCLE_CLIP_TYPE,
 				x: 100,
 				y: 100,
 				props: {
@@ -232,22 +239,23 @@ describe('CircleClipShapeUtil', () => {
 
 			// Should be a polygon approximation of a circle
 			// Check that points are roughly in a circle pattern
-			const centerX = 100 // shape.x
-			const centerY = 100 // shape.y
-			const radius = 100 // min(w, h) / 2
+			// The clip path is inset by half the stroke width (STROKE_WIDTH / 2 = 1)
+			const centerX = 100 // shape.props.w / 2
+			const centerY = 100 // shape.props.h / 2
+			const clipRadius = 99 // min(w, h) / 2 - STROKE_WIDTH / 2 = 100 - 1
 
 			clipPath.forEach((point) => {
 				const distance = Math.sqrt(Math.pow(point.x - centerX, 2) + Math.pow(point.y - centerY, 2))
-				expect(distance).toBeCloseTo(radius, 0)
+				expect(distance).toBeCloseTo(clipRadius, 0)
 			})
 		})
 	})
 
 	describe('child clipping behavior', () => {
 		it('should clip children when clipping is enabled', () => {
-			editor.createShape<CircleClipShape>({
+			editor.createShape({
 				id: ids.circleClip1,
-				type: 'circle-clip',
+				type: CIRCLE_CLIP_TYPE,
 				x: 100,
 				y: 100,
 				props: {
@@ -256,7 +264,7 @@ describe('CircleClipShapeUtil', () => {
 				},
 			})
 
-			editor.createShape<TLTextShape>({
+			editor.createShape({
 				id: ids.text1,
 				type: 'text',
 				x: 0,
@@ -279,9 +287,9 @@ describe('CircleClipShapeUtil', () => {
 		it('should not clip children when clipping is disabled', () => {
 			isClippingEnabled$.set(false)
 
-			editor.createShape<CircleClipShape>({
+			editor.createShape({
 				id: ids.circleClip1,
-				type: 'circle-clip',
+				type: CIRCLE_CLIP_TYPE,
 				x: 100,
 				y: 100,
 				props: {
@@ -290,7 +298,7 @@ describe('CircleClipShapeUtil', () => {
 				},
 			})
 
-			editor.createShape<TLTextShape>({
+			editor.createShape({
 				id: ids.text1,
 				type: 'text',
 				x: 0,
@@ -314,9 +322,9 @@ describe('CircleClipShapeUtil', () => {
 describe('Integration tests', () => {
 	it('should create and manage circle clip shapes with children', () => {
 		// Create circle clip shape
-		editor.createShape<CircleClipShape>({
+		editor.createShape({
 			id: ids.circleClip1,
-			type: 'circle-clip',
+			type: CIRCLE_CLIP_TYPE,
 			x: 100,
 			y: 100,
 			props: {
@@ -326,7 +334,7 @@ describe('Integration tests', () => {
 		})
 
 		// Add text child
-		editor.createShape<TLTextShape>({
+		editor.createShape({
 			id: ids.text1,
 			type: 'text',
 			x: 50,
@@ -338,7 +346,7 @@ describe('Integration tests', () => {
 		})
 
 		// Add geo child
-		editor.createShape<TLGeoShape>({
+		editor.createShape({
 			id: ids.geo1,
 			type: 'geo',
 			x: 150,
@@ -375,9 +383,9 @@ describe('Integration tests', () => {
 
 	it('should handle multiple circle clip shapes independently', () => {
 		// Create two circle clip shapes
-		editor.createShape<CircleClipShape>({
+		editor.createShape({
 			id: ids.circleClip1,
-			type: 'circle-clip',
+			type: CIRCLE_CLIP_TYPE,
 			x: 100,
 			y: 100,
 			props: {
@@ -386,9 +394,9 @@ describe('Integration tests', () => {
 			},
 		})
 
-		editor.createShape<CircleClipShape>({
+		editor.createShape({
 			id: ids.circleClip2,
-			type: 'circle-clip',
+			type: CIRCLE_CLIP_TYPE,
 			x: 400,
 			y: 100,
 			props: {
@@ -398,7 +406,7 @@ describe('Integration tests', () => {
 		})
 
 		// Add children to both
-		editor.createShape<TLTextShape>({
+		editor.createShape({
 			id: ids.text1,
 			type: 'text',
 			x: 0,
@@ -409,7 +417,7 @@ describe('Integration tests', () => {
 			},
 		})
 
-		editor.createShape<TLTextShape>({
+		editor.createShape({
 			id: ids.geo1,
 			type: 'text',
 			x: 0,

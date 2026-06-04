@@ -156,13 +156,16 @@ export function useRecording({
   const upload = useCallback(
     async (blob: Blob, finalDuration: number, filename: string) => {
       onRecordingStopped?.();
+      console.log("DEBUG hostId:", hostId);   // 👈 Add this line
+    console.log("DEBUG roomId:", roomId);
       try {
         const response = await fetch("/api/recordings/upload", {
           method: "POST",
           headers: {
             "Content-Type": "application/octet-stream",
             "x-room-id": roomId,
-            "x-host-id": hostId?.toString() || "",
+            // "x-host-id": hostId?.toString() || "",
+            "x-host-id": hostId ? hostId.toString() : "0",
             "x-duration": finalDuration.toString(),
             "x-original-filename": filename,
             "x-mime-type": blob.type || "",

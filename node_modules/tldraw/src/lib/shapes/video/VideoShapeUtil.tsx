@@ -73,6 +73,16 @@ export class VideoShapeUtil extends BaseBoxShapeUtil<TLVideoShape> {
 		return <rect width={toDomPrecision(shape.props.w)} height={toDomPrecision(shape.props.h)} />
 	}
 
+	override useLegacyIndicator() {
+		return false
+	}
+
+	override getIndicatorPath(shape: TLVideoShape): Path2D {
+		const path = new Path2D()
+		path.rect(0, 0, shape.props.w, shape.props.h)
+		return path
+	}
+
 	override async toSvg(shape: TLVideoShape, ctx: SvgExportContext) {
 		const props = shape.props
 		if (!props.assetId) return null
@@ -95,7 +105,8 @@ export class VideoShapeUtil extends BaseBoxShapeUtil<TLVideoShape> {
 
 const VideoShape = memo(function VideoShape({ shape }: { shape: TLVideoShape }) {
 	const editor = useEditor()
-	const showControls = editor.getShapeGeometry(shape).bounds.w * editor.getZoomLevel() >= 110
+	const showControls =
+		editor.getShapeGeometry(shape).bounds.w * editor.getEfficientZoomLevel() >= 110
 	const isEditing = useIsEditing(shape.id)
 	const prefersReducedMotion = usePrefersReducedMotion()
 	const { Spinner } = useEditorComponents()
