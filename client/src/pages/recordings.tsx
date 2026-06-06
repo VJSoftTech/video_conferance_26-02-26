@@ -272,10 +272,10 @@ export default function RecordingsPage() {
               return (
                 <div
                   key={recording.id}
-                  className="flex gap-4 bg-white dark:bg-card rounded-2xl border shadow-sm overflow-hidden"
+                  className="flex flex-col sm:flex-row gap-4 bg-white dark:bg-card rounded-2xl border shadow-sm overflow-hidden"
                 >
                   {/* Thumbnail */}
-                  <div className="relative flex-shrink-0 w-[380px] h-[240px] bg-black rounded-l-2xl overflow-hidden">
+                  <div className="relative flex-shrink-0 w-full sm:w-[380px] h-[200px] sm:h-[240px] bg-black rounded-t-2xl sm:rounded-t-none sm:rounded-l-2xl overflow-hidden">
                     {audio ? (
                       <AudioThumbnail duration={recording.duration} />
                     ) : (
@@ -289,7 +289,7 @@ export default function RecordingsPage() {
                   </div>
 
                   {/* Info */}
-                  <div className="flex-1 min-w-0 py-4 pr-2">
+                  <div className="flex-1 min-w-0 py-4 px-4 sm:px-0 sm:pr-2">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="font-bold text-base leading-tight">
                         {recording.meetingTitle || "Instant Meeting - Recording"}
@@ -340,10 +340,10 @@ export default function RecordingsPage() {
                   </div>
 
                   {/* Actions */}
-                  <div className="flex flex-col justify-center gap-2 pr-5 py-4 flex-shrink-0">
+                  <div className="flex flex-row sm:flex-col justify-center gap-2 px-4 pb-4 sm:px-0 sm:pr-5 sm:py-4 flex-shrink-0">
                     <Button
                       size="sm"
-                      className="w-32 bg-purple-100 hover:bg-purple-200 text-purple-700 border-0 shadow-none font-medium"
+                      className="flex-1 sm:flex-none sm:w-32 bg-purple-100 hover:bg-purple-200 text-purple-700 border-0 shadow-none font-medium"
                       onClick={() => setPlayingRecording(recording)}
                     >
                       <Play className="w-4 h-4 mr-1.5" />
@@ -351,7 +351,7 @@ export default function RecordingsPage() {
                     </Button>
                     <Button
                       size="sm"
-                      className="w-32 bg-green-100 hover:bg-green-200 text-green-700 border-0 shadow-none font-medium"
+                      className="flex-1 sm:flex-none sm:w-32 bg-green-100 hover:bg-green-200 text-green-700 border-0 shadow-none font-medium"
                       onClick={() => handleDownload(recording)}
                     >
                       <Download className="w-4 h-4 mr-1.5" />
@@ -359,7 +359,7 @@ export default function RecordingsPage() {
                     </Button>
                     <Button
                       size="sm"
-                      className="w-32 bg-red-100 hover:bg-red-200 text-red-600 border-0 shadow-none font-medium"
+                      className="flex-1 sm:flex-none sm:w-32 bg-red-100 hover:bg-red-200 text-red-600 border-0 shadow-none font-medium"
                       onClick={() => setDeleteConfirm(recording)}
                     >
                       <Trash2 className="w-4 h-4 mr-1.5" />
