@@ -82,6 +82,7 @@ export function useRecording({
   const startTimeRef = useRef<number>(0);
   const pausedTimeRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordingTypeRef = useRef<"AUDIO" | "VIDEO">("VIDEO");
 
   const startTimer = useCallback(() => {
     startTimeRef.current = Date.now();
@@ -154,21 +155,19 @@ export function useRecording({
   }, []);
 
   const upload = useCallback(
-    async (blob: Blob, finalDuration: number, filename: string) => {
+    async (blob: Blob, finalDuration: number, filename: string, recType: "AUDIO" | "VIDEO" = "VIDEO") => {
       onRecordingStopped?.();
-      console.log("DEBUG hostId:", hostId);   // 👈 Add this line
-    console.log("DEBUG roomId:", roomId);
       try {
         const response = await fetch("/api/recordings/upload", {
           method: "POST",
           headers: {
             "Content-Type": "application/octet-stream",
             "x-room-id": roomId,
-            // "x-host-id": hostId?.toString() || "",
             "x-host-id": hostId ? hostId.toString() : "0",
             "x-duration": finalDuration.toString(),
             "x-original-filename": filename,
             "x-mime-type": blob.type || "",
+            "x-recording-type": recType,
           },
           body: blob,
         });
@@ -383,6 +382,8 @@ export function useRecording({
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
 
+    recordingTypeRef.current = "VIDEO";
+
     mr.onstop = async () => {
       const blob = new Blob(chunksRef.current, { type: mimeType });
       const dur = getFinalDuration();
@@ -392,6 +393,7 @@ export function useRecording({
         blob,
         dur,
         `meeting_${roomId}_${new Date().toISOString().slice(0, 10)}.${ext}`,
+        "VIDEO",
       );
     };
 
@@ -436,6 +438,8 @@ export function useRecording({
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
 
+    recordingTypeRef.current = "AUDIO";
+
     mr.onstop = async () => {
       const finalMime = mimeType || mr.mimeType || "audio/webm";
       const blob = new Blob(chunksRef.current, { type: finalMime });
@@ -444,7 +448,7 @@ export function useRecording({
         .toISOString()
         .slice(0, 10)}.${ext}`;
       cleanupAudio();
-      await upload(blob, dur, filename);
+      await upload(blob, dur, filename, "AUDIO");
     };
 
     mr.start(1000);
@@ -569,6 +573,7 @@ export function useRecording({
     formattedDuration: formatDuration(duration),
     recordingMode,
     startRecording,
+    startAudioRecording: startAudioOnlyRecording,
     pauseRecording,
     resumeRecording,
     stopRecording,
@@ -578,5 +583,6 @@ export function useRecording({
     isRecordingSupported: typeof MediaRecorder !== "undefined",
     isMobile: isMobileDevice(),
     isScreenRecording: recordingMode === "screen",
+    onTracksChanged: () => {},
   };
 }

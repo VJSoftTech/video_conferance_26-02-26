@@ -12,7 +12,7 @@ import "@livekit/components-styles";
 import { Track, RoomEvent, ConnectionState } from "livekit-client";
 import { useToast } from "@/hooks/use-toast";
 import { useRecording } from "@/hooks/use-recording";
-import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users, ChevronUp, ChevronDown, Lock, UserCheck, UserX, X } from "lucide-react";
+import { Loader2, ArrowLeft, Link2, Check, Crown, Clock, Users, ChevronUp, ChevronDown, Lock, UserCheck, UserX, X, LayoutTemplate } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -22,6 +22,7 @@ import { ParticipantsPanel } from "@/components/meeting/participants-panel";
 import { HostControlsPanel } from "@/components/meeting/host-controls-panel";
 import { WhiteboardPanel } from "@/components/meeting/whiteboard-panel";
 import { ChatPanel } from "@/components/meeting/chat-panel";
+import { RecordingTypeModal, type RecordingTypeChoice } from "@/components/meeting/recording-type-modal";
 import { cn } from "@/lib/utils";
 import { io, Socket } from "socket.io-client";
 
@@ -128,10 +129,13 @@ function MeetingContent({
     return tracks;
   }, [room]);
 
+  const [showRecordingModal, setShowRecordingModal] = useState(false);
+
   const {
     state: recordingState,
     formattedDuration: recordingDuration,
     startRecording,
+    startAudioRecording,
     pauseRecording,
     resumeRecording,
     stopRecording,
@@ -712,6 +716,35 @@ function MeetingContent({
     onLeave();
   }, [roomId, onLeave, toast]);
 
+  const handleStartRecording = useCallback(() => {
+    setShowRecordingModal(true);
+  }, []);
+
+  const handleRecordingTypeSelected = useCallback(async (type: RecordingTypeChoice) => {
+    setShowRecordingModal(false);
+    if (type === "AUDIO") {
+      if (!isAudioEnabled) {
+        toast({
+          title: "Microphone Required",
+          description: "Please enable your microphone before starting audio recording.",
+          variant: "destructive",
+        });
+        return;
+      }
+      try {
+        await startAudioRecording();
+      } catch (error: any) {
+        toast({
+          title: "Recording Error",
+          description: error.message || "Failed to start audio recording",
+          variant: "destructive",
+        });
+      }
+    } else {
+      await startRecording();
+    }
+  }, [isAudioEnabled, startAudioRecording, startRecording, toast]);
+
   const handleAdmitParticipant = useCallback((socketId: string) => {
     socketRef.current?.emit("admit-participant", { roomId, socketId });
     setWaitingParticipants(prev => prev.filter(p => p.socketId !== socketId));
@@ -722,11 +755,23 @@ function MeetingContent({
     setWaitingParticipants(prev => prev.filter(p => p.socketId !== socketId));
   }, [roomId]);
 
+  const [isFeaturedLayout, setIsFeaturedLayout] = useState(false);
+
+  // Reset featured layout when participant count leaves 2
+  useEffect(() => {
+    if (participants.length !== 2) setIsFeaturedLayout(false);
+  }, [participants.length]);
+
+  const showFeaturedToggle = participants.length === 2 && !screenShareTrack;
+
   const gridClass = useMemo(() => {
     if (screenShareTrack) return "grid-cols-1";
     if (visibleParticipants.length === 1) return "grid-cols-1";
+    if (isFeaturedLayout && showFeaturedToggle) return "featured-grid";
     return "grid-cols-1 sm:grid-cols-2";
-  }, [visibleParticipants.length, screenShareTrack]);
+  }, [visibleParticipants.length, screenShareTrack, isFeaturedLayout, showFeaturedToggle]);
+
+  const gridStyle = useMemo(() => ({ gridAutoRows: "1fr" }), []);
 
   const showScrollButtons = participants.length > 2;
 
@@ -748,6 +793,16 @@ function MeetingContent({
         .lk-focus-layout, .lk-grid-layout {
           height: 100% !important;
         }
+        .featured-grid {
+          grid-template-columns: 1fr;
+          grid-template-rows: 7fr 3fr;
+        }
+        @media (min-width: 640px) {
+          .featured-grid {
+            grid-template-columns: 7fr 3fr;
+            grid-template-rows: 1fr;
+          }
+        }
       `}</style>
 
       <header id="meeting-header" className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-card shrink-0 z-30">
@@ -765,9 +820,22 @@ function MeetingContent({
             </Badge>
           )}
         </div>
-        <Button onClick={handleCopyLink} variant="outline" size="sm" data-testid="button-share-meeting">
-          {copied ? <><Check className="w-4 h-4 mr-2" />Copied!</> : <><Link2 className="w-4 h-4 mr-2" />Share</>}
-        </Button>
+        <div className="flex items-center gap-2">
+          {showFeaturedToggle && (
+            <Button
+              onClick={() => setIsFeaturedLayout((v) => !v)}
+              variant={isFeaturedLayout ? "default" : "outline"}
+              size="sm"
+              title={isFeaturedLayout ? "Switch to equal layout" : "Switch to focus layout (70/30)"}
+            >
+              <LayoutTemplate className="w-4 h-4 mr-1.5" />
+              {isFeaturedLayout ? "Equal" : "Focus"}
+            </Button>
+          )}
+          <Button onClick={handleCopyLink} variant="outline" size="sm" data-testid="button-share-meeting">
+            {copied ? <><Check className="w-4 h-4 mr-2" />Copied!</> : <><Link2 className="w-4 h-4 mr-2" />Share</>}
+          </Button>
+        </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden relative">
@@ -779,7 +847,7 @@ function MeetingContent({
           )}
           <div
             className={cn("grid gap-2 flex-1 min-h-0 w-full", gridClass)}
-            style={{ gridAutoRows: "1fr" }}
+            style={gridStyle}
           >
             {visibleParticipants.map((participant) => {
               const videoTrack = participant.getTrackPublication(Track.Source.Camera);
@@ -882,7 +950,7 @@ function MeetingContent({
           onToggleHostControls={() => setIsHostControlsOpen(!isHostControlsOpen)}
           onToggleHandRaise={handleToggleHandRaise}
           onSendReaction={handleSendReaction}
-          onStartRecording={startRecording}
+          onStartRecording={handleStartRecording}
           onPauseRecording={pauseRecording}
           onResumeRecording={resumeRecording}
           onStopRecording={stopRecording}
@@ -948,6 +1016,13 @@ function MeetingContent({
           </div>
         </div>
       )}
+
+      <RecordingTypeModal
+        open={showRecordingModal}
+        onClose={() => setShowRecordingModal(false)}
+        onSelect={handleRecordingTypeSelected}
+        isMicEnabled={isAudioEnabled}
+      />
 
       <RoomAudioRenderer />
     </div>

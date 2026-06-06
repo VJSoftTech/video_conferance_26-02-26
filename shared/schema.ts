@@ -188,6 +188,7 @@ export const meetingRecordings = pgTable("meeting_recordings", {
   fileSize: integer("file_size"),
   duration: integer("duration"),
   mimeType: text("mime_type").default("video/webm"),
+  recordingType: text("recording_type").default("VIDEO").notNull(),
   status: text("status").default("completed").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });

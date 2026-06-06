@@ -9,7 +9,7 @@ import { db } from "./db";
 import { meetings, meetingNotes, meetingTasks, meetingDocs, contacts, smtpSettings, meetingInvites, meetingWhiteboards, meetingParticipants, meetingRecordings } from "@shared/schema";
 import path from "path";
 import fs from "fs";
-import { eq, gte, and, lte, desc } from "drizzle-orm";
+import { eq, gte, and, lte, desc, sql } from "drizzle-orm";
 import { encryptPassword, decryptPassword, sendMeetingInvite, testSmtpConnection } from "./mail-service";
 import { 
   type ServerToClientEvents, 
@@ -43,6 +43,17 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   setupAuth(app);
+
+  // Ensure recording_type column exists (safe to run on every startup)
+  try {
+    await db.execute(sql`
+      ALTER TABLE meeting_recordings
+      ADD COLUMN IF NOT EXISTS recording_type TEXT NOT NULL DEFAULT 'VIDEO'
+    `);
+    log("recording_type column ensured", "migrations");
+  } catch (e: any) {
+    log(`Migration note: ${e.message}`, "migrations");
+  }
 
   // Set up Socket.IO
   const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, {}, SocketData>(
@@ -1373,6 +1384,8 @@ export async function registerRoutes(
             (req.headers["x-original-filename"] as string) || "recording.webm";
           const uploadedMimeType =
             (req.headers["x-mime-type"] as string) || "video/webm";
+          const rawRecordingType = (req.headers["x-recording-type"] as string || "").toUpperCase();
+          const recordingType = rawRecordingType === "AUDIO" ? "AUDIO" : "VIDEO";
 
           if (!roomId) {
             return res.status(400).json({ message: "Room ID is required" });
@@ -1403,6 +1416,7 @@ export async function registerRoutes(
               fileSize: buffer.length,
               duration,
               mimeType: uploadedMimeType || "video/webm",
+              recordingType,
               status: "completed",
             })
             .returning();
@@ -1424,11 +1438,31 @@ export async function registerRoutes(
 
   app.get("/api/recordings", async (req, res) => {
     try {
-      const recordings = await db.select().from(meetingRecordings)
-        .orderBy(desc(meetingRecordings.createdAt));
-      
+      const typeFilter = ((req.query.type as string) || "ALL").toUpperCase();
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 10));
+      const offset = (page - 1) * limit;
+
+      // Build the base query with optional type filter
+      let allRecordings;
+      if (typeFilter === "AUDIO") {
+        allRecordings = await db.select().from(meetingRecordings)
+          .where(eq(meetingRecordings.recordingType, "AUDIO"))
+          .orderBy(desc(meetingRecordings.createdAt));
+      } else if (typeFilter === "VIDEO") {
+        allRecordings = await db.select().from(meetingRecordings)
+          .where(eq(meetingRecordings.recordingType, "VIDEO"))
+          .orderBy(desc(meetingRecordings.createdAt));
+      } else {
+        allRecordings = await db.select().from(meetingRecordings)
+          .orderBy(desc(meetingRecordings.createdAt));
+      }
+
+      const total = allRecordings.length;
+      const paged = allRecordings.slice(offset, offset + limit);
+
       const recordingsWithMeetingInfo = await Promise.all(
-        recordings.map(async (recording) => {
+        paged.map(async (recording) => {
           let meetingTitle = null;
           if (recording.meetingId) {
             const [meeting] = await db.select().from(meetings).where(eq(meetings.id, recording.meetingId)).limit(1);
@@ -1437,8 +1471,8 @@ export async function registerRoutes(
           return { ...recording, meetingTitle };
         })
       );
-      
-      res.json(recordingsWithMeetingInfo);
+
+      res.json({ recordings: recordingsWithMeetingInfo, total, page, limit });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
